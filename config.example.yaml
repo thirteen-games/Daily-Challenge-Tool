@@ -1,0 +1,14 @@
+# Daily Challenge Tool Configuration
+# Copy this to config.yaml and fill in your credentials
+
+database:
+  host: "your-staging-host"
+  port: 3306
+  user: "perpetrader"
+  password: "your-password-here"
+  database: "GameData"
+
+# Optional: Anthropic API key for AI-powered deck theming
+# If not set, the tool will fall back to random generation
+anthropic:
+  api_key: ""  # Get from https://console.anthropic.com/

@@ -1034,6 +1034,16 @@
     </div>
 
     <div class="control-group">
+      <label>Popup Title (DialogueAsset)</label>
+      <input type="text" id="puzzleDialogueAsset" value="" placeholder="Leave empty for no popup" oninput="updatePuzzleSQL()">
+    </div>
+
+    <div class="control-group">
+      <label>Popup Text (DialogueText)</label>
+      <input type="text" id="puzzleDialogueText" value="" placeholder="Message body" oninput="updatePuzzleSQL()">
+    </div>
+
+    <div class="control-group">
       <label>Time to Live</label>
       <input type="datetime-local" id="puzzleTtlInput" oninput="updatePuzzleSQL()">
     </div>
@@ -3867,12 +3877,29 @@ function generatePuzzleSQL() {
   ];
 
   // Build Script JSON for activation levels
-  const script = {
-    Events: [0, 1, 2].map(round => ({
-      Trigger: { Turn: 0, Type: "RollEnergizeState", Round: round, Player: -1 },
-      Commands: [{ Type: "SetActivationLevelsCommand", Levels: actLevels }]
-    }))
-  };
+  const scriptEvents = [0, 1, 2].map(round => ({
+    Trigger: { Turn: 0, Type: "RollEnergizeState", Round: round, Player: -1 },
+    Commands: [{ Type: "SetActivationLevelsCommand", Levels: actLevels }]
+  }));
+
+  // Add dialogue popup event if configured
+  const dialogueAsset = document.getElementById('puzzleDialogueAsset').value.trim();
+  const dialogueText = document.getElementById('puzzleDialogueText').value.trim();
+  if (dialogueAsset || dialogueText) {
+    scriptEvents.push({
+      Trigger: { Turn: -1, Type: "RollEnergizeState", Round: 0, Player: -1 },
+      Commands: [
+        { Type: "ShowDialogueCommand" },
+        {
+          DialogueAsset: dialogueAsset,
+          DialogueText: dialogueText,
+          AwaitClientProgression: true
+        }
+      ]
+    });
+  }
+
+  const script = { Events: scriptEvents };
 
   // Build Settings JSON
   const puzzleFirstPlayer = document.getElementById('puzzleFirstPlayer').value;

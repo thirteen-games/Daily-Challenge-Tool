@@ -886,6 +886,15 @@
     </div>
 
     <div class="control-group">
+      <label>First Player</label>
+      <select id="firstPlayer" onchange="updateSQL()">
+        <option value="random">Random</option>
+        <option value="player">Player</option>
+        <option value="bot">Bot</option>
+      </select>
+    </div>
+
+    <div class="control-group">
       <label>Time to Live</label>
       <input type="datetime-local" id="ttlInput" oninput="updateSQL()">
     </div>
@@ -1850,25 +1859,31 @@ function generateSQL() {
   }
 
   // Settings JSON
+  const firstPlayer = document.getElementById('firstPlayer').value;
   const settings = {
     RewardID: DEFAULT_REWARD_ID,
     NovasToWin: novas,
     BotPersonaId: DEFAULT_BOT_PERSONA_ID,
     SkipDrafting: skipDraft,
     BackgroundPath: bg,
-    PlayerSettings: startCurrency !== 1
-      ? [
-          { StartingCurrency: startCurrency, StartingIncome: startCurrency + 1 },
-          { StartingCurrency: startCurrency, StartingIncome: startCurrency + 1 },
-        ]
-      : [
-          { StartingCurrency: startCurrency },
-          { StartingCurrency: startCurrency },
-        ],
   };
+  if (firstPlayer === 'player') {
+    settings.FirstPlayerId = 0;
+  } else if (firstPlayer === 'bot') {
+    settings.FirstPlayerId = 1;
+  }
   if (startingCards !== null) {
     settings.StartingCards = startingCards;
   }
+  settings.PlayerSettings = startCurrency !== 1
+    ? [
+        { StartingCurrency: startCurrency, StartingIncome: startCurrency + 1 },
+        { StartingCurrency: startCurrency, StartingIncome: startCurrency + 1 },
+      ]
+    : [
+        { StartingCurrency: startCurrency },
+        { StartingCurrency: startCurrency },
+      ];
   const settingsJSON = JSON.stringify(settings);
 
   const p0Cards = JSON.stringify(state.p0.cards.map(c => c.id));

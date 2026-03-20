@@ -1092,6 +1092,25 @@
         <button class="btn btn-sm" onclick="openPuzzleCardPicker('botHand')">+ Add Card to Hand</button>
       </div>
     </div>
+
+    <!-- Puzzle Decks -->
+    <div class="puzzle-hand-section" style="margin-top:12px;">
+      <div class="hand-section">
+        <h3><span style="color:var(--accent);">👤</span> Player Deck <span style="font-size:11px;color:var(--text-dim);font-weight:400;">(leave empty for default)</span></h3>
+        <div class="hand-cards" id="puzzlePlayerDeck">
+          <!-- Rendered by JS -->
+        </div>
+        <button class="btn btn-sm" onclick="openPuzzleDeckPicker('playerDeck')">+ Add Card to Deck</button>
+      </div>
+
+      <div class="hand-section">
+        <h3><span style="color:var(--danger);">🤖</span> Bot Deck <span style="font-size:11px;color:var(--text-dim);font-weight:400;">(leave empty for default)</span></h3>
+        <div class="hand-cards" id="puzzleBotDeck">
+          <!-- Rendered by JS -->
+        </div>
+        <button class="btn btn-sm" onclick="openPuzzleDeckPicker('botDeck')">+ Add Card to Deck</button>
+      </div>
+    </div>
   </div>
 
   <!-- PUZZLE SQL OUTPUT -->
@@ -3434,6 +3453,8 @@ const puzzleState = {
   board: Array.from({length: 4}, () => Array(4).fill(null)),
   playerHand: [],  // array of card IDs
   botHand: [],     // array of card IDs
+  playerDeck: [],  // array of card IDs (empty = use default deck 3703)
+  botDeck: [],     // array of card IDs (empty = use default deck 3704)
   solutionHint: '',
   solutionMath: '',
   difficulty: '',
@@ -3624,6 +3645,56 @@ function removeHandCard(handType, idx) {
   updatePuzzleSQL();
 }
 
+// ---- Puzzle Deck UI ----
+function renderPuzzleDecks() {
+  renderDeckCards('puzzlePlayerDeck', puzzleState.playerDeck, 'playerDeck');
+  renderDeckCards('puzzleBotDeck', puzzleState.botDeck, 'botDeck');
+}
+
+function renderDeckCards(containerId, deckCards, deckType) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  deckCards.forEach((cardId, idx) => {
+    const card = ALL_CARDS[cardId];
+    const cardData = CARD_DATA[cardId];
+    const name = card ? card.displayName : `#${cardId}`;
+    const cost = cardData ? cardData.cost : '?';
+    const chip = document.createElement('div');
+    chip.className = 'hand-card-chip';
+    chip.innerHTML = `
+      ${card ? spriteImg(card.name, 'card-sprite') : ''}
+      <span class="chip-cost">${cost}🪙</span>
+      <span>${name}</span>
+      <button class="chip-remove" onclick="removeDeckCard('${deckType}', ${idx})">&times;</button>
+    `;
+    container.appendChild(chip);
+  });
+}
+
+function removeDeckCard(deckType, idx) {
+  if (deckType === 'playerDeck') {
+    puzzleState.playerDeck.splice(idx, 1);
+  } else {
+    puzzleState.botDeck.splice(idx, 1);
+  }
+  renderPuzzleDecks();
+  updatePuzzleSQL();
+}
+
+function openPuzzleDeckPicker(deckType) {
+  boardPickerTarget = { type: deckType };
+  boardPickerOwner = deckType === 'playerDeck' ? 0 : 1;
+  boardCardFilterType = 'all';
+  document.getElementById('boardCardSearch').value = '';
+  document.getElementById('boardPickerTitle').textContent =
+    deckType === 'playerDeck' ? 'Add Card to Player Deck' : 'Add Card to Bot Deck';
+  updateBoardPickerOwnerBtns();
+  resetBoardFilterBtns();
+  renderBoardCardPicker();
+  document.getElementById('boardPickerOverlay').classList.add('active');
+  document.getElementById('boardCardSearch').focus();
+}
+
 // ---- Board Card Picker ----
 function openBoardPicker(row, col) {
   boardPickerTarget = { type: 'cell', row, col };
@@ -3739,6 +3810,12 @@ function renderBoardCardPicker() {
       } else if (boardPickerTarget.type === 'botHand') {
         puzzleState.botHand.push(card.id);
         renderPuzzleHands();
+      } else if (boardPickerTarget.type === 'playerDeck') {
+        puzzleState.playerDeck.push(card.id);
+        renderPuzzleDecks();
+      } else if (boardPickerTarget.type === 'botDeck') {
+        puzzleState.botDeck.push(card.id);
+        renderPuzzleDecks();
       }
       updatePuzzleSQL();
       closeBoardPicker();
@@ -3752,11 +3829,14 @@ function clearPuzzle() {
   puzzleState.board = Array.from({length: 4}, () => Array(4).fill(null));
   puzzleState.playerHand = [];
   puzzleState.botHand = [];
+  puzzleState.playerDeck = [];
+  puzzleState.botDeck = [];
   puzzleState.solutionHint = '';
   puzzleState.solutionMath = '';
   puzzleState.difficulty = '';
   renderPuzzleBoard();
   renderPuzzleHands();
+  renderPuzzleDecks();
   updatePuzzleSQL();
 }
 
@@ -3880,9 +3960,9 @@ function generatePuzzleSQL() {
   const settingsJSON = JSON.stringify(settings);
   const startingCardsJSON = JSON.stringify(startingCards);
 
-  // Fixed puzzle deck IDs (pre-existing empty decks that prevent card draws)
-  const PUZZLE_P0_DECK_ID = 3703;
-  const PUZZLE_P1_DECK_ID = 3704;
+  // Deck setup: use custom decks if provided, otherwise default IDs
+  const hasCustomP0Deck = puzzleState.playerDeck.length > 0;
+  const hasCustomP1Deck = puzzleState.botDeck.length > 0;
 
   // Asset key art
   let assetKeyArt = "CardSprites[Spike]";
@@ -3922,23 +4002,50 @@ function generatePuzzleSQL() {
     solutionLines.push(``);
   }
 
+  // Determine deck ID references for the scenario
+  const p0DeckRef = hasCustomP0Deck ? '@p0_deck_id' : '3703';
+  const p1DeckRef = hasCustomP1Deck ? '@p1_deck_id' : '3704';
+
   const lines = [
     ...solutionLines,
     `-- ========================================`,
     `-- Puzzle: ${title}`,
-    `-- Uses fixed puzzle decks: P0=3703, P1=3704`,
-    `-- ========================================`,
-    ``,
-    `-- Scenario`,
-    `INSERT INTO GameData.Scenario(Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`,
-    `VALUES(1, '${eName}', '${eDesc}', NULL, ${mapId}, 0, 0, ${p0ProId}, ${p1ProId}, ${PUZZLE_P0_DECK_ID}, 0, ${PUZZLE_P1_DECK_ID}, 0, '${eSettings}', '${eStartingCards}');`,
-    `SET @scenario_id = LAST_INSERT_ID();`,
-    ``,
-    `-- Daily Challenge`,
-    `INSERT INTO GameData.DailyChallenge(TimeToLive, Active, Title, Body, AssetKeyArt, ScenarioID)`,
-    `VALUES('${ttl}', 1, '${eName}', '${eBody}', '${eArt}', @scenario_id);`,
-    ``,
   ];
+
+  if (!hasCustomP0Deck && !hasCustomP1Deck) {
+    lines.push(`-- Uses fixed puzzle decks: P0=3703, P1=3704`);
+  }
+  lines.push(`-- ========================================`);
+  lines.push(``);
+
+  // Custom deck INSERTs
+  if (hasCustomP0Deck) {
+    const p0DeckCards = JSON.stringify(puzzleState.playerDeck);
+    lines.push(`-- Player Deck`);
+    lines.push(`INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
+    lines.push(`VALUES('${eName}', 'player', '${p0DeckCards}', '[]', 0, ${p0ProId});`);
+    lines.push(`SET @p0_deck_id = LAST_INSERT_ID();`);
+    lines.push(``);
+  }
+
+  if (hasCustomP1Deck) {
+    const p1DeckCards = JSON.stringify(puzzleState.botDeck);
+    lines.push(`-- Bot Deck`);
+    lines.push(`INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
+    lines.push(`VALUES('${eName}', 'bot', '${p1DeckCards}', '[]', 0, ${p1ProId});`);
+    lines.push(`SET @p1_deck_id = LAST_INSERT_ID();`);
+    lines.push(``);
+  }
+
+  lines.push(`-- Scenario`);
+  lines.push(`INSERT INTO GameData.Scenario(Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`);
+  lines.push(`VALUES(1, '${eName}', '${eDesc}', NULL, ${mapId}, 0, 0, ${p0ProId}, ${p1ProId}, ${p0DeckRef}, 0, ${p1DeckRef}, 0, '${eSettings}', '${eStartingCards}');`);
+  lines.push(`SET @scenario_id = LAST_INSERT_ID();`);
+  lines.push(``);
+  lines.push(`-- Daily Challenge`);
+  lines.push(`INSERT INTO GameData.DailyChallenge(TimeToLive, Active, Title, Body, AssetKeyArt, ScenarioID)`);
+  lines.push(`VALUES('${ttl}', 1, '${eName}', '${eBody}', '${eArt}', @scenario_id);`);
+  lines.push(``);
 
   return lines.join('\n');
 }

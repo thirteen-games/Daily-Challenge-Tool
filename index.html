@@ -1020,6 +1020,15 @@
     </div>
 
     <div class="control-group">
+      <label>First Player</label>
+      <select id="puzzleFirstPlayer" onchange="updatePuzzleSQL()">
+        <option value="random">Random</option>
+        <option value="player">Player</option>
+        <option value="bot">Bot</option>
+      </select>
+    </div>
+
+    <div class="control-group">
       <label>Time to Live</label>
       <input type="datetime-local" id="puzzleTtlInput" oninput="updatePuzzleSQL()">
     </div>
@@ -3759,32 +3768,37 @@ function generatePuzzleSQL() {
   };
 
   // Build Settings JSON
+  const puzzleFirstPlayer = document.getElementById('puzzleFirstPlayer').value;
   const settings = {
     Script: script,
     RewardID: DEFAULT_REWARD_ID,
     NovasToWin: novas,
     RoundLimit: 1,
     SkipDrafting: true,
-    FirstPlayerID: 0,
     StartingCards: 0,
     BackgroundPath: bg,
-    PlayerSettings: [
-      {
-        StartingScore: playerScore,
-        StartingIncome: 0,
-        StartingCurrency: playerCoins,
-        OverrideSuperpowers: true,
-        SuperpowerOrder: []
-      },
-      {
-        StartingScore: botScore,
-        StartingIncome: 12,
-        StartingCurrency: 0,
-        OverrideSuperpowers: true,
-        SuperpowerOrder: []
-      }
-    ]
   };
+  if (puzzleFirstPlayer === 'player') {
+    settings.FirstPlayerId = 0;
+  } else if (puzzleFirstPlayer === 'bot') {
+    settings.FirstPlayerId = 1;
+  }
+  settings.PlayerSettings = [
+    {
+      StartingScore: playerScore,
+      StartingIncome: 0,
+      StartingCurrency: playerCoins,
+      OverrideSuperpowers: true,
+      SuperpowerOrder: []
+    },
+    {
+      StartingScore: botScore,
+      StartingIncome: 12,
+      StartingCurrency: 0,
+      OverrideSuperpowers: true,
+      SuperpowerOrder: []
+    }
+  ];
 
   // Build StartingCards JSON
   const startingCards = [];

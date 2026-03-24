@@ -3889,8 +3889,8 @@ function generatePuzzleSQL() {
     scriptEvents.push({
       Trigger: { Turn: -1, Type: "RollEnergizeState", Round: 0, Player: -1 },
       Commands: [
-        { Type: "ShowDialogueCommand" },
         {
+          Type: "ShowDialogueCommand",
           DialogueAsset: dialogueAsset,
           DialogueText: dialogueText,
           AwaitClientProgression: true

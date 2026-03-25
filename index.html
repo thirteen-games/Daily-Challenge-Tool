@@ -4074,7 +4074,7 @@ function generatePuzzleSQL() {
     const p0DeckCards = JSON.stringify(puzzleState.playerDeck);
     lines.push(`-- Player Deck`);
     if (overrideP0DeckId) {
-      lines.push(`INSERT INTO GameData.Deck(DeckID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
+      lines.push(`INSERT INTO GameData.Deck(ID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
       lines.push(`VALUES(${overrideP0DeckId}, '${eName}', 'player', '${p0DeckCards}', '[]', 0, ${p0ProId});`);
     } else {
       lines.push(`INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
@@ -4088,7 +4088,7 @@ function generatePuzzleSQL() {
     const p1DeckCards = JSON.stringify(puzzleState.botDeck);
     lines.push(`-- Bot Deck`);
     if (overrideP1DeckId) {
-      lines.push(`INSERT INTO GameData.Deck(DeckID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
+      lines.push(`INSERT INTO GameData.Deck(ID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
       lines.push(`VALUES(${overrideP1DeckId}, '${eName}', 'bot', '${p1DeckCards}', '[]', 0, ${p1ProId});`);
     } else {
       lines.push(`INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
@@ -4100,7 +4100,7 @@ function generatePuzzleSQL() {
 
   lines.push(`-- Scenario`);
   if (overrideScenarioId) {
-    lines.push(`INSERT INTO GameData.Scenario(ScenarioID, Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`);
+    lines.push(`INSERT INTO GameData.Scenario(ID, Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`);
     lines.push(`VALUES(${overrideScenarioId}, 1, '${eName}', '${eDesc}', NULL, ${mapId}, 0, 0, ${p0ProId}, ${p1ProId}, ${p0DeckRef}, 0, ${p1DeckRef}, 0, '${eSettings}', '${eStartingCards}');`);
   } else {
     lines.push(`INSERT INTO GameData.Scenario(Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`);

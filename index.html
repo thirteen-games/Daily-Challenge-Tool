@@ -1053,6 +1053,11 @@
       <input type="text" id="puzzleScenarioId" value="" placeholder="Auto" oninput="updatePuzzleSQL()">
     </div>
 
+    <div class="control-group" style="display: flex; align-items: center; gap: 8px;">
+      <input type="checkbox" id="puzzleOverwrite" onchange="updatePuzzleSQL()" style="width: auto;">
+      <label for="puzzleOverwrite" style="margin: 0;">Overwrite existing records</label>
+    </div>
+
     <div class="control-group">
       <label>P0 Deck ID (blank = next available)</label>
       <input type="text" id="puzzleP0DeckId" value="" placeholder="Auto" oninput="updatePuzzleSQL()">
@@ -4182,6 +4187,7 @@ function generatePuzzleSQL() {
   const overrideScenarioId = document.getElementById('puzzleScenarioId').value.trim();
   const overrideP0DeckId = document.getElementById('puzzleP0DeckId').value.trim();
   const overrideP1DeckId = document.getElementById('puzzleP1DeckId').value.trim();
+  const overwrite = document.getElementById('puzzleOverwrite').checked;
   const ttlStr = document.getElementById('puzzleTtlInput').value;
   const ttl = ttlStr ? formatDateTimeSQL(new Date(ttlStr)) : formatDateTimeSQL(new Date());
 
@@ -4363,11 +4369,15 @@ function generatePuzzleSQL() {
   lines.push(`-- ========================================`);
   lines.push(``);
 
-  // Custom deck INSERTs
+  // Custom deck INSERTs (or UPDATEs when overwriting)
   if (hasCustomP0Deck) {
     const p0DeckCards = JSON.stringify(puzzleState.playerDeck);
     lines.push(`-- Player Deck`);
-    if (overrideP0DeckId) {
+    if (overwrite && overrideP0DeckId) {
+      lines.push(`UPDATE GameData.Deck`);
+      lines.push(`SET Name = '${eName}', Description = 'player', Cards = '${p0DeckCards}', Superpowers = '[]', DeckCategoryID = 0, ProfessionalID = ${p0ProId}`);
+      lines.push(`WHERE ID = ${overrideP0DeckId};`);
+    } else if (overrideP0DeckId) {
       lines.push(`INSERT INTO GameData.Deck(ID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
       lines.push(`VALUES(${overrideP0DeckId}, '${eName}', 'player', '${p0DeckCards}', '[]', 0, ${p0ProId});`);
     } else {
@@ -4381,7 +4391,11 @@ function generatePuzzleSQL() {
   if (hasCustomP1Deck) {
     const p1DeckCards = JSON.stringify(puzzleState.botDeck);
     lines.push(`-- Bot Deck`);
-    if (overrideP1DeckId) {
+    if (overwrite && overrideP1DeckId) {
+      lines.push(`UPDATE GameData.Deck`);
+      lines.push(`SET Name = '${eName}', Description = 'bot', Cards = '${p1DeckCards}', Superpowers = '[]', DeckCategoryID = 0, ProfessionalID = ${p1ProId}`);
+      lines.push(`WHERE ID = ${overrideP1DeckId};`);
+    } else if (overrideP1DeckId) {
       lines.push(`INSERT INTO GameData.Deck(ID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`);
       lines.push(`VALUES(${overrideP1DeckId}, '${eName}', 'bot', '${p1DeckCards}', '[]', 0, ${p1ProId});`);
     } else {
@@ -4393,7 +4407,11 @@ function generatePuzzleSQL() {
   }
 
   lines.push(`-- Scenario`);
-  if (overrideScenarioId) {
+  if (overwrite && overrideScenarioId) {
+    lines.push(`UPDATE GameData.Scenario`);
+    lines.push(`SET Active = 1, Name = '${eName}', Description = '${eDesc}', Hint = NULL, MapId = ${mapId}, MirrorMatch = 0, TeamBuilderDeckID = 0, P0ProfessionalID = ${p0ProId}, P1ProfessionalID = ${p1ProId}, P0DeckID = ${p0DeckRef}, P0DeckCategoryID = 0, P1DeckID = ${p1DeckRef}, P1DeckCategoryID = 0, Settings = '${eSettings}', StartingCards = '${eStartingCards}'`);
+    lines.push(`WHERE ID = ${overrideScenarioId};`);
+  } else if (overrideScenarioId) {
     lines.push(`INSERT INTO GameData.Scenario(ID, Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`);
     lines.push(`VALUES(${overrideScenarioId}, 1, '${eName}', '${eDesc}', NULL, ${mapId}, 0, 0, ${p0ProId}, ${p1ProId}, ${p0DeckRef}, 0, ${p1DeckRef}, 0, '${eSettings}', '${eStartingCards}');`);
   } else {

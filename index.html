@@ -914,6 +914,19 @@
 
   <!-- DECK PANELS -->
   <div class="decks-area">
+    <!-- Starting Board (collapsible, optional) -->
+    <div class="board-section" id="challengeBoardSection" style="grid-column:1 / -1;">
+      <h3 onclick="toggleChallengeBoard()" style="cursor:pointer;user-select:none;margin-bottom:0;">
+        <span id="challengeBoardChevron" style="display:inline-block;width:14px;transition:transform 0.15s;">▶</span>
+        🎮 Starting Board
+        <span style="font-size:11px;color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0;">Optional — place pre-existing cards on the board</span>
+      </h3>
+      <div id="challengeBoardContent" style="display:none;margin-top:12px;">
+        <div class="board-grid" id="challengeBoard"></div>
+        <button class="btn btn-sm btn-danger" onclick="clearChallengeBoard()">🗑️ Clear Board</button>
+      </div>
+    </div>
+
     <!-- Player Deck -->
     <div class="deck-panel" id="playerPanel">
       <h3>Player Deck <span class="badge">P0</span></h3>
@@ -1632,6 +1645,9 @@ function showToast(msg) {
 const state = {
   p0: { proId: 2, cards: [], superpowers: [], deckName: "" },
   p1: { proId: 7, cards: [], superpowers: [], deckName: "" },
+  // Optional starting board for the challenge. 4 rows (Penthouse, Mezz, Lobby, Basement) x 4 cols.
+  // Each cell is null or { cardId, player, hp?, glitched? }.
+  board: Array.from({length: 4}, () => Array(4).fill(null)),
 };
 
 let cardPickerTarget = null; // 'p0' or 'p1'
@@ -2000,6 +2016,34 @@ function generateSQL() {
   const p1Cards = JSON.stringify(state.p1.cards.map(c => c.id));
   const p1Sp = JSON.stringify(state.p1.superpowers);
 
+  // Optional starting board → StartingCards JSON
+  const startingBoardCards = [];
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 4; c++) {
+      const cell = state.board[r][c];
+      if (!cell) continue;
+      const entry = {
+        Card: cell.cardId,
+        Level: ROW_CODES[r],
+        Column: c,
+        Player: cell.player,
+        Location: "Board"
+      };
+      const cd = CARD_DATA[cell.cardId];
+      const hasHpOverride = cd && cd.hp > 0 && cell.hp !== undefined && cell.hp !== cd.hp;
+      const hasGlitch = cell.glitched;
+      if (hasHpOverride || hasGlitch) {
+        entry.Status = {};
+        if (hasHpOverride) entry.Status.CurrentHealth = cell.hp;
+        if (hasGlitch) entry.Status.IsGlitched = true;
+      }
+      startingBoardCards.push(entry);
+    }
+  }
+  const startingCardsSQL = startingBoardCards.length > 0
+    ? `'${escapeSQL(JSON.stringify(startingBoardCards))}'`
+    : `'null'`;
+
   const eName = escapeSQL(title);
   const eBody = escapeSQL(body);
   const eArt = escapeSQL(assetKeyArt);
@@ -2022,7 +2066,7 @@ function generateSQL() {
     ``,
     `-- Scenario`,
     `INSERT INTO GameData.Scenario(Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`,
-    `VALUES(1, '${eName}', NULL, NULL, ${mapId}, ${mirror ? 1 : 0}, 0, ${state.p0.proId}, ${state.p1.proId}, @p0_deck_id, 0, @p1_deck_id, 0, '${eSettings}', 'null');`,
+    `VALUES(1, '${eName}', NULL, NULL, ${mapId}, ${mirror ? 1 : 0}, 0, ${state.p0.proId}, ${state.p1.proId}, @p0_deck_id, 0, @p1_deck_id, 0, '${eSettings}', ${startingCardsSQL});`,
     `SET @scenario_id = LAST_INSERT_ID();`,
     ``,
     `-- Daily Challenge`,
@@ -3769,6 +3813,129 @@ function setBoardCardGlitched(row, col, glitched) {
   updatePuzzleSQL();
 }
 
+// ---- Challenge Board (optional starting board on the challenge tab) ----
+function toggleChallengeBoard() {
+  const content = document.getElementById('challengeBoardContent');
+  const chev = document.getElementById('challengeBoardChevron');
+  const isHidden = content.style.display === 'none';
+  content.style.display = isHidden ? '' : 'none';
+  chev.style.transform = isHidden ? 'rotate(90deg)' : '';
+  if (isHidden) renderChallengeBoard();
+}
+
+function renderChallengeBoard() {
+  const grid = document.getElementById('challengeBoard');
+  if (!grid) return;
+  grid.innerHTML = '';
+
+  grid.appendChild(createEl('div', ''));
+  for (let c = 0; c < 4; c++) {
+    grid.appendChild(createEl('div', `Col ${c}`, 'board-col-header'));
+  }
+
+  for (let r = 0; r < 4; r++) {
+    grid.appendChild(createEl('div', ROW_NAMES[r], 'board-row-label'));
+
+    for (let c = 0; c < 4; c++) {
+      const cell = state.board[r][c];
+      const cellEl = document.createElement('div');
+      let cls = 'board-cell';
+      if (cell) {
+        cls += ' occupied';
+        cls += cell.player === 0 ? ' player-cell' : ' bot-cell';
+      }
+      cellEl.className = cls;
+
+      if (cell) {
+        const card = ALL_CARDS[cell.cardId];
+        const cardData = CARD_DATA[cell.cardId];
+        const name = card ? card.displayName : `#${cell.cardId}`;
+        const sprite = card ? spriteImg(card.name, 'card-sprite') : '';
+        const ownerLabel = cell.player === 0 ? 'Player' : 'Bot';
+        const ownerCls = cell.player === 0 ? 'p0' : 'p1';
+        const defaultHp = cardData ? cardData.hp : 0;
+        const currentHp = cell.hp !== undefined ? cell.hp : defaultHp;
+        const hpInput = defaultHp > 0
+          ? `<input type="number" class="cell-hp-input" value="${currentHp}" min="0" max="99"
+              onclick="event.stopPropagation()"
+              onchange="event.stopPropagation();setChallengeBoardCardHp(${r},${c},this.value)"
+              title="Health">`
+          : '';
+        const isFriend = card && card.type === 1;
+        const glitchCheck = isFriend
+          ? `<label class="cell-glitch" onclick="event.stopPropagation()" title="Glitched">
+              <input type="checkbox" ${cell.glitched ? 'checked' : ''}
+                onclick="event.stopPropagation()"
+                onchange="event.stopPropagation();setChallengeBoardCardGlitched(${r},${c},this.checked)">
+              <span style="font-size:10px;">Glitch</span>
+            </label>`
+          : '';
+        cellEl.innerHTML = `
+          ${sprite}
+          <span class="cell-card-name">${name}</span>
+          <span class="cell-owner ${ownerCls}">${ownerLabel} ${hpInput}</span>
+          ${glitchCheck}
+          <button class="cell-remove" onclick="event.stopPropagation();removeChallengeBoardCard(${r},${c})">&times;</button>
+        `;
+        cellEl.onclick = () => openChallengeBoardPicker(r, c);
+      } else {
+        cellEl.innerHTML = '<span style="font-size:18px;color:var(--border);">+</span>';
+        cellEl.onclick = () => openChallengeBoardPicker(r, c);
+      }
+
+      grid.appendChild(cellEl);
+    }
+  }
+}
+
+function openChallengeBoardPicker(row, col) {
+  boardPickerTarget = { type: 'cell', context: 'challenge', row, col };
+  const existing = state.board[row][col];
+  boardPickerOwner = existing ? existing.player : 1;
+  boardCardFilterType = 'all';
+  document.getElementById('boardCardSearch').value = '';
+  document.getElementById('boardPickerTitle').textContent =
+    `Place Card — ${ROW_NAMES[row]} Col ${col}`;
+  updateBoardPickerOwnerBtns();
+  resetBoardFilterBtns();
+  renderBoardCardPicker();
+  document.getElementById('boardPickerOverlay').classList.add('active');
+  document.getElementById('boardCardSearch').focus();
+}
+
+function removeChallengeBoardCard(row, col) {
+  state.board[row][col] = null;
+  renderChallengeBoard();
+  updateSQL();
+}
+
+function setChallengeBoardCardHp(row, col, value) {
+  const cell = state.board[row][col];
+  if (!cell) return;
+  const cardData = CARD_DATA[cell.cardId];
+  const defaultHp = cardData ? cardData.hp : 0;
+  const newHp = parseInt(value) || 0;
+  if (newHp === defaultHp) {
+    delete cell.hp;
+  } else {
+    cell.hp = newHp;
+  }
+  updateSQL();
+}
+
+function setChallengeBoardCardGlitched(row, col, glitched) {
+  const cell = state.board[row][col];
+  if (!cell) return;
+  if (glitched) cell.glitched = true; else delete cell.glitched;
+  updateSQL();
+}
+
+function clearChallengeBoard() {
+  state.board = Array.from({length: 4}, () => Array(4).fill(null));
+  renderChallengeBoard();
+  updateSQL();
+}
+
 // ---- Hand Rendering ----
 function renderPuzzleHands() {
   renderHand('puzzlePlayerHand', puzzleState.playerHand, 'playerHand');
@@ -3958,6 +4125,16 @@ function renderBoardCardPicker() {
       <span style="margin-left:auto;font-size:10px;color:var(--text-dim);">${costStr}${hpStr} ${clsName}</span>
     `;
     el.onclick = () => {
+      if (boardPickerTarget.type === 'cell' && boardPickerTarget.context === 'challenge') {
+        state.board[boardPickerTarget.row][boardPickerTarget.col] = {
+          cardId: card.id,
+          player: boardPickerOwner
+        };
+        renderChallengeBoard();
+        updateSQL();
+        closeBoardPicker();
+        return;
+      }
       if (boardPickerTarget.type === 'cell') {
         puzzleState.board[boardPickerTarget.row][boardPickerTarget.col] = {
           cardId: card.id,

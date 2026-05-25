@@ -2120,38 +2120,121 @@ async function generateAITheme() {
   const numFriends = parseInt(document.getElementById('numFriends').value) || 4;
   const numPowers = parseInt(document.getElementById('numPowers').value) || 2;
 
+  // Word→number lookup for parsing "two", "three", etc.
+  const WORD_NUM = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10};
+  const parseCount = s => {
+    if (!s) return null;
+    const lower = s.toLowerCase();
+    if (WORD_NUM[lower] !== undefined) return WORD_NUM[lower];
+    const n = parseInt(s);
+    return isNaN(n) ? null : n;
+  };
+
+  // Detect cost-distribution patterns like "two of each cost between 1 and 4",
+  // "2 cost-3 cards", "three 4-cost cards". Returns a list of {cls,cost} slots, or null.
+  const parseCostDistribution = (text) => {
+    const lower = text.toLowerCase();
+
+    // Pattern A: range — "N of each cost [card[s]] [between|from|in] X (and|to|through|-) Y"
+    const rangeRe = /(\w+)\s+of\s+each\s+cost\s+(?:cards?\s+)?(?:between\s+|from\s+|in\s+)?(\d+)\s*(?:and|to|through|-|–|—)\s*(\d+)/;
+    const rangeMatch = lower.match(rangeRe);
+    if (rangeMatch) {
+      const count = parseCount(rangeMatch[1]);
+      const lo = parseInt(rangeMatch[2]);
+      const hi = parseInt(rangeMatch[3]);
+      if (count && !isNaN(lo) && !isNaN(hi) && lo <= hi && hi - lo <= 10) {
+        const slots = [];
+        for (let c = lo; c <= hi; c++) {
+          for (let i = 0; i < count; i++) slots.push({ cls: null, cost: c });
+        }
+        return slots;
+      }
+    }
+
+    // Pattern B: enumerated — "N (of) (each) cost X card(s)" possibly multiple times
+    const enumRe = /(\w+)\s+(?:of\s+)?(?:each\s+)?cost[- ]?(\d+)\s*cards?/g;
+    const enumSlots = [];
+    let m;
+    while ((m = enumRe.exec(lower)) !== null) {
+      const count = parseCount(m[1]);
+      const cost = parseInt(m[2]);
+      if (count && !isNaN(cost)) {
+        for (let i = 0; i < count; i++) enumSlots.push({ cls: null, cost });
+      }
+    }
+    if (enumSlots.length > 0) return enumSlots;
+
+    // Pattern C: "N X-cost card(s)" possibly multiple times
+    const variantRe = /(\w+)\s+(\d+)[- ]cost\s+cards?/g;
+    const variantSlots = [];
+    while ((m = variantRe.exec(lower)) !== null) {
+      const count = parseCount(m[1]);
+      const cost = parseInt(m[2]);
+      if (count && !isNaN(cost)) {
+        for (let i = 0; i < count; i++) variantSlots.push({ cls: null, cost });
+      }
+    }
+    if (variantSlots.length > 0) return variantSlots;
+
+    return null;
+  };
+
   // Detect "explicit card list" mode: numbered list like "1: Energy 2 cost" or "Card 1: ..."
   const isExplicitList = /^\s*(?:card\s*)?\d+\s*[:\-\.]/im.test(theme);
 
-  // For explicit list mode: resolve cards entirely in JS, only ask AI for pro/sp/title/body
+  // Detect cost-distribution mode (only if not already in explicit-list mode)
+  const distributionSlots = isExplicitList ? null : parseCostDistribution(theme);
+  const useSlotMode = isExplicitList || distributionSlots !== null;
+
+  // For slot-based modes: resolve cards entirely in JS, only ask AI for pro/sp/title/body
   let resolvedFriendIds = null;
   let resolvedPowerIds  = null;
+  let effectiveNumFriends = numFriends;
+  let effectiveNumPowers  = numPowers;
 
-  if (isExplicitList) {
+  if (useSlotMode) {
     const CLASS_NAME_MAP = {
       'boom':1,'energy':2,'moxie':3,'floral':4,'cyber':5,'distortion':6,'cosmic':7,'magic':8
     };
-    const lines = theme.split('\n');
-    const slotLines = lines.filter(l => /^\s*(?:card\s*)?\d+\s*[:\-\.]/i.test(l));
-    const totalSlots = slotLines.length;
 
-    // Parse each slot into {cls, cost}
-    const slots = slotLines.map(l => {
-      const lower = l.toLowerCase();
-      let cls = null;
-      for (const [name, id] of Object.entries(CLASS_NAME_MAP)) {
-        if (lower.includes(name)) { cls = id; break; }
+    // Parse slots from whichever mode was detected
+    let slots;
+    if (isExplicitList) {
+      const lines = theme.split('\n');
+      const slotLines = lines.filter(l => /^\s*(?:card\s*)?\d+\s*[:\-\.]/i.test(l));
+      slots = slotLines.map(l => {
+        const lower = l.toLowerCase();
+        let cls = null;
+        for (const [name, id] of Object.entries(CLASS_NAME_MAP)) {
+          if (lower.includes(name)) { cls = id; break; }
+        }
+        const costMatch = lower.match(/(\d+)\s*cost/);
+        const cost = costMatch ? parseInt(costMatch[1]) : null;
+        return { cls, cost };
+      });
+    } else {
+      slots = distributionSlots;
+    }
+
+    const totalSlots = slots.length;
+
+    // Auto-adjust slot counts when the request implies a specific total
+    if (totalSlots > 0 && (numFriends + numPowers) !== totalSlots) {
+      const sum = numFriends + numPowers;
+      if (sum === 0) {
+        effectiveNumFriends = Math.ceil(totalSlots * 2 / 3);
+        effectiveNumPowers  = totalSlots - effectiveNumFriends;
+      } else {
+        effectiveNumFriends = Math.round(totalSlots * numFriends / sum);
+        effectiveNumPowers  = totalSlots - effectiveNumFriends;
       }
-      const costMatch = lower.match(/(\d+)\s*cost/);
-      const cost = costMatch ? parseInt(costMatch[1]) : null;
-      return { cls, cost };
-    });
+      document.getElementById('numFriends').value = effectiveNumFriends;
+      document.getElementById('numPowers').value  = effectiveNumPowers;
+    }
 
-    // Assign Friend/Power types randomly, respecting numFriends/numPowers
-    const numF = parseInt(document.getElementById('numFriends').value) || 4;
-    const numP = parseInt(document.getElementById('numPowers').value) || 2;
-    const friendCount = Math.min(numF, totalSlots);
-    const powerCount  = Math.min(numP, totalSlots - friendCount);
+    // Assign Friend/Power types randomly, respecting effective counts
+    const friendCount = Math.min(effectiveNumFriends, totalSlots);
+    const powerCount  = Math.min(effectiveNumPowers, totalSlots - friendCount);
     const typeAssignments = Array(friendCount).fill('Friend').concat(Array(powerCount).fill('Power'));
     while (typeAssignments.length < totalSlots) typeAssignments.push('Friend');
     for (let i = typeAssignments.length - 1; i > 0; i--) {
@@ -2183,7 +2266,7 @@ async function generateAITheme() {
       const p0Cands = candidates.filter(c => !usedP0.has(c.id));
       const p0Pick = p0Cands.length > 0
         ? p0Cands[Math.floor(Math.random() * p0Cands.length)]
-        : candidates[Math.floor(Math.random() * candidates.length)];
+        : (candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : null);
       if (p0Pick) {
         usedP0.add(p0Pick.id);
         (isFriend ? p0Friends : p0Powers).push(p0Pick.id);
@@ -2194,7 +2277,7 @@ async function generateAITheme() {
       const p1Pool = p1Cands.length > 0 ? p1Cands : candidates.filter(c => !usedP1.has(c.id));
       const p1Pick = p1Pool.length > 0
         ? p1Pool[Math.floor(Math.random() * p1Pool.length)]
-        : candidates[Math.floor(Math.random() * candidates.length)];
+        : (candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : null);
       if (p1Pick) {
         usedP1.add(p1Pick.id);
         (isFriend ? p1Friends : p1Powers).push(p1Pick.id);
@@ -2207,7 +2290,7 @@ async function generateAITheme() {
 
   // Build card list for prompt
   let cardListStr = "";
-  if (isExplicitList) {
+  if (useSlotMode) {
     // Only need professionals list — cards are already resolved
     cardListStr = "PROFESSIONALS AND SUPERPOWERS:\n";
     for (const [pid, pro] of Object.entries(PROFESSIONALS)) {
@@ -2239,7 +2322,7 @@ async function generateAITheme() {
   }
 
   let prompt;
-  if (isExplicitList) {
+  if (useSlotMode) {
     prompt = `You are helping build two opposing card decks for a daily challenge in a game called Nova Island.
 
 Theme/card requirements: "${theme}"
@@ -2290,6 +2373,7 @@ IMPORTANT: Each card has a Class (Boom, Energy, Moxie, Floral, Cyber, Distortion
 - Choose cards from across the ENTIRE list — do not favor cards near the beginning or end.
 - When the user asks for "exactly one card from each class" (or similar phrasing), you MUST ensure that within each deck, no two cards share the same Class. Each class may appear AT MOST ONCE per deck. Count the classes of every card you select and verify there are no duplicates before finalizing. This applies to both Friend and Power cards combined.
 - When enforcing class uniqueness: first identify all valid cards matching any other constraints (cost, type, etc.), then select from them such that each class appears exactly once. If a class has no eligible cards under the other constraints, skip it. Never include two cards of the same class in the same deck when this rule is in effect.
+- COST DISTRIBUTION: When the user requests a specific count per cost value (e.g. "two of each cost between 1 and 4", "3 cost-2 cards and 2 cost-3 cards", "one card of each cost from 1 to 5"), you MUST produce EXACTLY that count for EACH specified cost. Before finalizing, list every card you picked alongside its cost, group them by cost, and verify the count per cost matches the request exactly. Apply the same distribution to BOTH the player deck and the bot deck. If the requested distribution implies a different total than the deck slot counts above, prioritize the requested distribution — both decks should contain exactly the requested number of cards per cost, with friends/powers split sensibly between them.
 
 ${cardListStr}
 
@@ -2355,15 +2439,15 @@ Respond with ONLY a JSON object:
 
     const result = JSON.parse(text);
 
-    // In explicit list mode, overwrite card IDs with JS-resolved ones
-    if (isExplicitList && resolvedFriendIds && resolvedPowerIds) {
+    // In slot-based modes, overwrite card IDs with JS-resolved ones
+    if (useSlotMode && resolvedFriendIds && resolvedPowerIds) {
       result.player_deck.friend_card_ids = resolvedFriendIds.p0;
       result.player_deck.power_card_ids  = resolvedPowerIds.p0;
       result.bot_deck.friend_card_ids    = resolvedFriendIds.p1;
       result.bot_deck.power_card_ids     = resolvedPowerIds.p1;
     }
 
-    applyAIResult(result, numFriends, numPowers, isExplicitList);
+    applyAIResult(result, effectiveNumFriends, effectiveNumPowers, useSlotMode);
 
     statusEl.textContent = 'Done! Decks generated.';
     statusEl.className = 'ai-status success';
@@ -2377,7 +2461,7 @@ Respond with ONLY a JSON object:
   }
 }
 
-function applyAIResult(result, numFriends, numPowers, isExplicitList) {
+function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS) {
   const validFriendIds = new Set(FRIEND_CARDS.map(c => c.id));
   const validPowerIds = new Set(POWER_CARDS.map(c => c.id));
 
@@ -2413,8 +2497,8 @@ function applyAIResult(result, numFriends, numPowers, isExplicitList) {
       powerIds = dedupeByClass(powerIds);
     }
 
-    // Pad if needed (skip in explicit list mode — AI determined exact cards)
-    if (!isExplicitList) {
+    // Pad if needed (skip when cards were already resolved deterministically in JS)
+    if (!cardsResolvedByJS) {
       if (friendIds.length < numFriends) {
         const remaining = FRIEND_CARDS.filter(c => !friendIds.includes(c.id)).map(c => c.id);
         friendIds.push(...randomSample(remaining, numFriends - friendIds.length));

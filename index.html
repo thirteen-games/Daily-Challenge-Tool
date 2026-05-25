@@ -5415,11 +5415,13 @@ function addSlotRow() {
   const row = document.createElement('div');
   row.className = 'slot-row';
 
-  const classOpts = SLOT_CLASSES.map(c => `<option value="${c}">${c}</option>`).join('');
-  const costOpts  = SLOT_COSTS.map(c => `<option value="${c}">${c} cost</option>`).join('');
+  const typeOpts  = `<option value="random" selected>Random type</option><option value="Friend">Friend</option><option value="Power">Power</option>`;
+  const classOpts = `<option value="random" selected>Random class</option>` + SLOT_CLASSES.map(c => `<option value="${c}">${c}</option>`).join('');
+  const costOpts  = `<option value="random" selected>Random cost</option>` + SLOT_COSTS.map(c => `<option value="${c}">${c} cost</option>`).join('');
 
   row.innerHTML = `
     <span class="slot-num">${idx}</span>
+    <select class="slot-type">${typeOpts}</select>
     <select class="slot-class">${classOpts}</select>
     <select class="slot-cost">${costOpts}</select>
     <button class="remove-slot" onclick="removeSlotRow(this)" title="Remove">×</button>
@@ -5456,29 +5458,47 @@ async function generateFromSlots() {
     return;
   }
 
-  // Parse slots
+  // Parse slots. "random" sentinel → null (no constraint)
   const CLASS_NAME_MAP = {
     'Boom':1,'Energy':2,'Moxie':3,'Floral':4,'Cyber':5,'Distortion':6,'Cosmic':7,'Magic':8
   };
-  const slots = rows.map(row => ({
-    cls:  CLASS_NAME_MAP[row.querySelector('.slot-class').value],
-    cost: parseInt(row.querySelector('.slot-cost').value),
-    clsName: row.querySelector('.slot-class').value,
-  }));
+  const slots = rows.map(row => {
+    const clsVal  = row.querySelector('.slot-class').value;
+    const costVal = row.querySelector('.slot-cost').value;
+    const typeVal = row.querySelector('.slot-type').value;
+    return {
+      cls:      clsVal === 'random'  ? null : CLASS_NAME_MAP[clsVal],
+      cost:     costVal === 'random' ? null : parseInt(costVal),
+      typeReq:  typeVal === 'random' ? null : typeVal,  // 'Friend' | 'Power' | null
+      clsName:  clsVal === 'random'  ? 'any-class' : clsVal,
+    };
+  });
 
   const totalSlots = slots.length;
   const numF = parseInt(document.getElementById('numFriends').value) || 4;
   const numP = parseInt(document.getElementById('numPowers').value)  || 2;
-  const friendCount = Math.min(numF, totalSlots);
-  const powerCount  = Math.min(numP, totalSlots - friendCount);
 
-  // Randomly assign Friend/Power
-  const typeAssignments = Array(friendCount).fill('Friend').concat(Array(powerCount).fill('Power'));
-  while (typeAssignments.length < totalSlots) typeAssignments.push('Friend');
-  for (let i = typeAssignments.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [typeAssignments[i], typeAssignments[j]] = [typeAssignments[j], typeAssignments[i]];
+  // Assign types: honor explicit Friend/Power first, fill Random slots to satisfy numF/numP
+  const explicitFriends = slots.filter(s => s.typeReq === 'Friend').length;
+  const explicitPowers  = slots.filter(s => s.typeReq === 'Power').length;
+  const randomSlotIndexes = slots.map((s, i) => s.typeReq === null ? i : -1).filter(i => i !== -1);
+  const remainingSlots = randomSlotIndexes.length;
+  let needFriends = Math.max(0, Math.min(remainingSlots, numF - explicitFriends));
+  let needPowers  = Math.max(0, Math.min(remainingSlots - needFriends, numP - explicitPowers));
+  // Fill any leftover random slots proportionally to numF:numP
+  let leftover = remainingSlots - needFriends - needPowers;
+  while (leftover > 0) {
+    const ratio = (numF + numP) > 0 ? numF / (numF + numP) : 0.5;
+    if (Math.random() < ratio) needFriends++; else needPowers++;
+    leftover--;
   }
+  const randomTypes = Array(needFriends).fill('Friend').concat(Array(needPowers).fill('Power'));
+  for (let i = randomTypes.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [randomTypes[i], randomTypes[j]] = [randomTypes[j], randomTypes[i]];
+  }
+  const typeAssignments = slots.map(s => s.typeReq);
+  randomSlotIndexes.forEach((slotIdx, k) => { typeAssignments[slotIdx] = randomTypes[k]; });
 
   // Resolve cards in JS
   const usedP0 = new Set(), usedP1 = new Set();
@@ -5491,7 +5511,10 @@ async function generateFromSlots() {
 
     const candidates = pool.filter(c => {
       const d = CARD_DATA[c.id];
-      return d && d.cls === cls && d.cost === cost;
+      if (!d) return false;
+      if (cls !== null && d.cls !== cls) return false;
+      if (cost !== null && d.cost !== cost) return false;
+      return true;
     });
 
     if (candidates.length === 0) continue;
@@ -5507,9 +5530,10 @@ async function generateFromSlots() {
   }
 
   // Build slot summary for the AI prompt (title/body/pro/sp only)
-  const slotSummary = slots.map((s, i) =>
-    `${i+1}. ${s.clsName} ${s.cost}-cost ${typeAssignments[i]}`
-  ).join('\n');
+  const slotSummary = slots.map((s, i) => {
+    const costStr = s.cost === null ? 'any-cost' : `${s.cost}-cost`;
+    return `${i+1}. ${s.clsName} ${costStr} ${typeAssignments[i]}`;
+  }).join('\n');
 
   const proListStr = Object.entries(PROFESSIONALS).map(([pid, pro]) => {
     const spNames = pro.superpowers.map(id => `${getCardName(id)} (ID=${id})`).join(', ');

@@ -256,6 +256,33 @@
   }
   .sp-select-row select { flex: 1; font-size: 12px; }
 
+  .sp-order-list { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+  .sp-avail-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .sp-order-item, .sp-avail-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    background: var(--card);
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .sp-order-item { border-left: 3px solid var(--super); }
+  .sp-avail-item { border: 1px dashed var(--border); cursor: pointer; }
+  .sp-avail-item:hover { border-color: var(--super); color: var(--super); }
+  .sp-order-item .sp-num {
+    font-size: 10px; font-weight: 700; color: var(--text-dim);
+    min-width: 14px; text-align: center;
+  }
+  .sp-order-item .sp-name, .sp-avail-item .sp-name { flex: 1; }
+  .sp-order-item .sp-mini-btn {
+    background: none; border: none; color: var(--text-dim);
+    cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1;
+  }
+  .sp-order-item .sp-mini-btn:hover:not(:disabled) { color: var(--text); }
+  .sp-order-item .sp-mini-btn:disabled { opacity: 0.3; cursor: default; }
+  .sp-empty-hint { font-size: 11px; color: var(--text-dim); font-style: italic; }
+
   /* SQL area */
   .sql-header {
     display: flex;
@@ -940,6 +967,15 @@
           <select id="p0SpSelect" onchange="onSpChange('p0')"></select>
           <button class="btn btn-sm" onclick="rollSp('p0')">🔄</button>
         </div>
+        <div class="checkbox-row" style="margin-top:8px;">
+          <input type="checkbox" id="p0NoSuper" onchange="onNoSuperChange('p0')">
+          <span>No superpowers</span>
+        </div>
+        <div id="p0SuperOrderGroup" style="display:none;margin-top:8px;">
+          <label>Draw Order</label>
+          <div class="sp-order-list" id="p0SuperOrderList"></div>
+          <div class="sp-avail-list" id="p0SuperAvailList"></div>
+        </div>
       </div>
       <label style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.5px;font-weight:600;display:block;margin-bottom:4px;">Cards</label>
       <div class="card-list" id="p0CardList"></div>
@@ -961,6 +997,15 @@
         <div class="sp-select-row">
           <select id="p1SpSelect" onchange="onSpChange('p1')"></select>
           <button class="btn btn-sm" onclick="rollSp('p1')">🔄</button>
+        </div>
+        <div class="checkbox-row" style="margin-top:8px;">
+          <input type="checkbox" id="p1NoSuper" onchange="onNoSuperChange('p1')">
+          <span>No superpowers</span>
+        </div>
+        <div id="p1SuperOrderGroup" style="display:none;margin-top:8px;">
+          <label>Draw Order</label>
+          <div class="sp-order-list" id="p1SuperOrderList"></div>
+          <div class="sp-avail-list" id="p1SuperAvailList"></div>
         </div>
       </div>
       <label style="font-size:11px;text-transform:uppercase;color:var(--text-dim);letter-spacing:0.5px;font-weight:600;display:block;margin-bottom:4px;">Cards</label>
@@ -1591,16 +1636,38 @@ function getBackgroundForPro(proId) {
   return locs[Math.floor(Math.random() * locs.length)];
 }
 
+// Gold superpowers — every valid loadout is exactly 1 gold + 2 non-gold supers.
+const GOLD_SUPERPOWERS = new Set([
+  75,  // Super Boost
+  300, // Recharge
+  90,  // Armory
+  180, // Armory (token)
+  303, // Ocean's Fury
+  71,  // Super Bloom
+  307, // Rootquake
+  72,  // Joe Clone
+  309, // Rat-A-Tack
+  64,  // Infinite Wisdom
+  312, // Unicoin
+  93,  // Swipe Madness
+  315, // Breach
+  95,  // THE Spell
+  318, // Harmonize
+  164, // Superposition
+  321, // Singularity
+]);
+
 function getSuperpowerLoadouts(proId) {
   const pro = PROFESSIONALS[proId];
   if (!pro) return [];
-  const sp = pro.superpowers;
-  // Pairs: (sp[0], sp[3]), (sp[1], sp[4]), (sp[2], sp[5])
+  const gold = pro.superpowers.filter(id => GOLD_SUPERPOWERS.has(id));
+  const nonGold = pro.superpowers.filter(id => !GOLD_SUPERPOWERS.has(id));
+  // 1 gold + 2 non-gold per loadout (2 golds × C(4,2) non-gold pairs = 12 combos).
   const loadouts = [];
-  for (const a of [sp[0], sp[3]]) {
-    for (const b of [sp[1], sp[4]]) {
-      for (const c of [sp[2], sp[5]]) {
-        loadouts.push([a, b, c]);
+  for (const g of gold) {
+    for (let i = 0; i < nonGold.length; i++) {
+      for (let j = i + 1; j < nonGold.length; j++) {
+        loadouts.push([g, nonGold[i], nonGold[j]]);
       }
     }
   }
@@ -1643,8 +1710,10 @@ function showToast(msg) {
 // ============================================================
 
 const state = {
-  p0: { proId: 2, cards: [], superpowers: [], deckName: "" },
-  p1: { proId: 7, cards: [], superpowers: [], deckName: "" },
+  // noSuper: emit OverrideSuperpowers:true + empty SuperpowerOrder (disable superpowers for this player)
+  // superOrder: ordered superpower IDs for PlayerSettings.SuperpowerOrder (only used when noSuper is false)
+  p0: { proId: 2, cards: [], superpowers: [], deckName: "", noSuper: false, superOrder: [] },
+  p1: { proId: 7, cards: [], superpowers: [], deckName: "", noSuper: false, superOrder: [] },
   // Optional starting board for the challenge. 4 rows (Penthouse, Mezz, Lobby, Basement) x 4 cols.
   // Each cell is null or { cardId, player, hp?, glitched? }.
   board: Array.from({length: 4}, () => Array(4).fill(null)),
@@ -1758,8 +1827,16 @@ function randomizeAll() {
   state.p1.cards = [...p1Friends, ...p1Powers].sort((a, b) => a.id - b.id);
   state.p1.superpowers = randomChoice(getSuperpowerLoadouts(p1Pro));
 
+  // Pros changed — drop any draw-order superpowers that no longer belong to each pro
+  for (const side of ['p0', 'p1']) {
+    const valid = new Set((PROFESSIONALS[state[side].proId] && PROFESSIONALS[state[side].proId].superpowers) || []);
+    state[side].superOrder = state[side].superOrder.filter(id => valid.has(id));
+  }
+
   renderDeck('p0');
   renderDeck('p1');
+  renderSuperOrder('p0');
+  renderSuperOrder('p1');
   updateSQL();
 }
 
@@ -1847,7 +1924,82 @@ function onProChange(side) {
   const loadouts = getSuperpowerLoadouts(proId);
   state[side].superpowers = randomChoice(loadouts);
   renderSp(side);
+  // Drop any draw-order superpowers that don't belong to the new pro
+  const valid = new Set((PROFESSIONALS[proId] && PROFESSIONALS[proId].superpowers) || []);
+  state[side].superOrder = state[side].superOrder.filter(id => valid.has(id));
+  renderSuperOrder(side);
   updateSQL();
+}
+
+function onNoSuperChange(side) {
+  state[side].noSuper = document.getElementById(side + 'NoSuper').checked;
+  renderSuperOrder(side);
+  updateSQL();
+}
+
+function addSuperOrder(side, id) {
+  if (!state[side].superOrder.includes(id)) state[side].superOrder.push(id);
+  renderSuperOrder(side);
+  updateSQL();
+}
+
+function removeSuperOrder(side, id) {
+  state[side].superOrder = state[side].superOrder.filter(x => x !== id);
+  renderSuperOrder(side);
+  updateSQL();
+}
+
+function moveSuperOrder(side, idx, dir) {
+  const arr = state[side].superOrder;
+  const j = idx + dir;
+  if (j < 0 || j >= arr.length) return;
+  [arr[idx], arr[j]] = [arr[j], arr[idx]];
+  renderSuperOrder(side);
+  updateSQL();
+}
+
+function renderSuperOrder(side) {
+  const noSuper = state[side].noSuper;
+  document.getElementById(side + 'NoSuper').checked = noSuper;
+  const group = document.getElementById(side + 'SuperOrderGroup');
+  group.style.display = noSuper ? 'none' : 'block';
+  if (noSuper) return;
+
+  const proId = state[side].proId;
+  const proSps = (PROFESSIONALS[proId] && PROFESSIONALS[proId].superpowers) || [];
+  const order = state[side].superOrder;
+
+  const orderEl = document.getElementById(side + 'SuperOrderList');
+  orderEl.innerHTML = '';
+  if (order.length === 0) {
+    orderEl.innerHTML = '<span class="sp-empty-hint">Default order — click a superpower below to set a custom draw order.</span>';
+  }
+  order.forEach((id, idx) => {
+    const card = ALL_CARDS[id];
+    const row = document.createElement('div');
+    row.className = 'sp-order-item';
+    row.innerHTML = `
+      <span class="sp-num">${idx + 1}</span>
+      ${card ? spriteImg(card.name, 'sp-sprite') : ''}
+      <span class="sp-name">${getCardDisplayName(id)}</span>
+      <button type="button" class="sp-mini-btn" title="Move up" ${idx === 0 ? 'disabled' : ''} onclick="moveSuperOrder('${side}', ${idx}, -1)">▲</button>
+      <button type="button" class="sp-mini-btn" title="Move down" ${idx === order.length - 1 ? 'disabled' : ''} onclick="moveSuperOrder('${side}', ${idx}, 1)">▼</button>
+      <button type="button" class="sp-mini-btn" title="Remove" onclick="removeSuperOrder('${side}', ${id})">✕</button>`;
+    orderEl.appendChild(row);
+  });
+
+  const availEl = document.getElementById(side + 'SuperAvailList');
+  availEl.innerHTML = '';
+  const available = proSps.filter(id => !order.includes(id));
+  available.forEach(id => {
+    const card = ALL_CARDS[id];
+    const chip = document.createElement('div');
+    chip.className = 'sp-avail-item';
+    chip.title = 'Add to draw order';
+    chip.onclick = () => addSuperOrder(side, id);
+    chip.innerHTML = `${card ? spriteImg(card.name, 'sp-sprite') : ''}<span class="sp-name">${getCardDisplayName(id)}</span><span>+</span>`;
+    availEl.appendChild(chip);
+  });
 }
 
 function onSpChange(side) {
@@ -1923,7 +2075,6 @@ function renderCardPicker() {
   const list = document.getElementById('cardPickerList');
   list.innerHTML = '';
   const search = document.getElementById('cardSearch').value.toLowerCase();
-  const inDeck = new Set(state[cardPickerTarget].cards.map(c => c.id));
 
   let cards = [];
   if (cardFilterType === 'all') cards = [...FRIEND_CARDS, ...POWER_CARDS, ...SUPERPOWER_CARDS];
@@ -1934,9 +2085,8 @@ function renderCardPicker() {
   cards = cards.filter(c => c.displayName.toLowerCase().includes(search) || c.name.toLowerCase().includes(search));
 
   for (const card of cards) {
-    const isDisabled = inDeck.has(card.id);
     const el = document.createElement('div');
-    el.className = `modal-item ${isDisabled ? 'disabled' : ''}`;
+    el.className = 'modal-item';
     const typeCls = card.type === 1 ? 'friend' : card.type === 3 ? 'super' : 'power';
     el.innerHTML = `
       ${spriteImg(card.name, 'modal-sprite')}
@@ -1944,15 +2094,13 @@ function renderCardPicker() {
       <span class="id-label">#${card.id}</span>
       <span>${card.displayName}</span>
     `;
-    if (!isDisabled) {
-      el.onclick = () => {
-        state[cardPickerTarget].cards.push(card);
-        state[cardPickerTarget].cards.sort((a, b) => a.id - b.id);
-        renderDeck(cardPickerTarget);
-        updateSQL();
-        closeCardPicker();
-      };
-    }
+    el.onclick = () => {
+      state[cardPickerTarget].cards.push(card);
+      state[cardPickerTarget].cards.sort((a, b) => a.id - b.id);
+      renderDeck(cardPickerTarget);
+      updateSQL();
+      closeCardPicker();
+    };
     list.appendChild(el);
   }
 }
@@ -2000,15 +2148,20 @@ function generateSQL() {
   if (startingCards !== null) {
     settings.StartingCards = startingCards;
   }
-  settings.PlayerSettings = startCurrency !== 1
-    ? [
-        { StartingCurrency: startCurrency, StartingIncome: startCurrency + 1 },
-        { StartingCurrency: startCurrency, StartingIncome: startCurrency + 1 },
-      ]
-    : [
-        { StartingCurrency: startCurrency },
-        { StartingCurrency: startCurrency },
-      ];
+  const buildPlayerSettings = (side) => {
+    const entry = { StartingCurrency: startCurrency };
+    if (startCurrency !== 1) entry.StartingIncome = startCurrency + 1;
+    const s = state[side];
+    if (s.noSuper) {
+      entry.OverrideSuperpowers = true;
+      entry.SuperpowerOrder = [];
+    } else if (s.superOrder.length > 0) {
+      entry.OverrideSuperpowers = true;
+      entry.SuperpowerOrder = [...s.superOrder];
+    }
+    return entry;
+  };
+  settings.PlayerSettings = [buildPlayerSettings('p0'), buildPlayerSettings('p1')];
   const settingsJSON = JSON.stringify(settings);
 
   const p0Cards = JSON.stringify(state.p0.cards.map(c => c.id));
@@ -2569,10 +2722,13 @@ function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS) {
     state[side].proId = proId;
     state[side].cards = cards;
     state[side].superpowers = spIds;
+    const validSp = new Set(PROFESSIONALS[proId].superpowers || []);
+    state[side].superOrder = state[side].superOrder.filter(id => validSp.has(id));
 
     document.getElementById(side + 'ProSelect').value = proId;
     updateSpSelect(side);
     renderDeck(side);
+    renderSuperOrder(side);
   }
 
   parseDeck(result.player_deck, 'p0');

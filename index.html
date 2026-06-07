@@ -369,8 +369,18 @@
   .modal-search:focus { border-color: var(--accent); }
   .modal-filter {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     margin: 0 16px 8px;
+  }
+  .modal-filter .filter-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    align-self: center;
+    margin-right: 2px;
   }
   .modal-filter .filter-btn {
     padding: 3px 10px;
@@ -1315,6 +1325,8 @@
       <button class="filter-btn" data-filter="power" onclick="setCardFilter('power', this)">Powers</button>
       <button class="filter-btn" data-filter="super" onclick="setCardFilter('super', this)">Supers</button>
     </div>
+    <div class="modal-filter" id="cardCostFilter"><span class="filter-label">Cost</span></div>
+    <div class="modal-filter" id="cardClassFilter"><span class="filter-label">Class</span></div>
     <div class="modal-list" id="cardPickerList"></div>
   </div>
 </div>
@@ -1721,6 +1733,9 @@ const state = {
 
 let cardPickerTarget = null; // 'p0' or 'p1'
 let cardFilterType = 'all';
+const cardCostFilter = new Set();   // selected costs (OR within group)
+const cardClassFilter = new Set();  // selected class ids (OR within group)
+let cardFilterButtonsBuilt = false;
 
 // ============================================================
 // INITIALIZATION
@@ -2047,12 +2062,51 @@ function onSkipDraftingChange() {
 function openCardPicker(side) {
   cardPickerTarget = side;
   cardFilterType = 'all';
+  cardCostFilter.clear();
+  cardClassFilter.clear();
+  buildCardFilterButtons();
   document.getElementById('cardSearch').value = '';
-  document.querySelectorAll('.modal-filter .filter-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector('.modal-filter .filter-btn[data-filter="all"]').classList.add('active');
+  document.querySelectorAll('#cardPickerOverlay .modal-filter .filter-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector('#cardPickerOverlay .modal-filter .filter-btn[data-filter="all"]').classList.add('active');
   renderCardPicker();
   document.getElementById('cardPickerOverlay').classList.add('active');
   document.getElementById('cardSearch').focus();
+}
+
+// Build the cost + class filter buttons once, from the actual friend/power card data.
+function buildCardFilterButtons() {
+  if (cardFilterButtonsBuilt) return;
+  const costs = new Set();
+  const classes = new Set();
+  for (const card of [...FRIEND_CARDS, ...POWER_CARDS]) {
+    const d = CARD_DATA[card.id];
+    if (!d) continue;
+    if (d.cost !== undefined) costs.add(d.cost);
+    if (d.cls !== undefined && d.cls !== 0) classes.add(d.cls);
+  }
+  const costRow = document.getElementById('cardCostFilter');
+  [...costs].sort((a, b) => a - b).forEach(cost => {
+    const btn = document.createElement('button');
+    btn.className = 'filter-btn';
+    btn.textContent = cost;
+    btn.onclick = () => toggleCardFilter(cardCostFilter, cost, btn);
+    costRow.appendChild(btn);
+  });
+  const classRow = document.getElementById('cardClassFilter');
+  [...classes].sort((a, b) => a - b).forEach(cls => {
+    const btn = document.createElement('button');
+    btn.className = 'filter-btn';
+    btn.textContent = CARD_CLASS_NAMES[cls] || cls;
+    btn.onclick = () => toggleCardFilter(cardClassFilter, cls, btn);
+    classRow.appendChild(btn);
+  });
+  cardFilterButtonsBuilt = true;
+}
+
+function toggleCardFilter(set, value, btn) {
+  if (set.has(value)) { set.delete(value); btn.classList.remove('active'); }
+  else { set.add(value); btn.classList.add('active'); }
+  renderCardPicker();
 }
 
 function closeCardPicker(e) {
@@ -2083,6 +2137,9 @@ function renderCardPicker() {
   else if (cardFilterType === 'super') cards = [...SUPERPOWER_CARDS];
 
   cards = cards.filter(c => c.displayName.toLowerCase().includes(search) || c.name.toLowerCase().includes(search));
+
+  if (cardCostFilter.size > 0) cards = cards.filter(c => CARD_DATA[c.id] && cardCostFilter.has(CARD_DATA[c.id].cost));
+  if (cardClassFilter.size > 0) cards = cards.filter(c => CARD_DATA[c.id] && cardClassFilter.has(CARD_DATA[c.id].cls));
 
   for (const card of cards) {
     const el = document.createElement('div');
@@ -2239,7 +2296,11 @@ function autoTitle() {
 
 function autoBody() {
   const novas = parseInt(document.getElementById('novasToWin').value) || 20;
-  return `<align="center">Win a match to ${novas}<style=Novas></style>!`;
+  const startCurrency = parseInt(document.getElementById('startingCurrency').value) || 1;
+  let body = `<align="center">Win a match to ${novas}<style=Novas></style>!`;
+  if (startCurrency !== 1) body += `\nStart with ${startCurrency}<style=Coin></style>`;
+  if (state.p0.noSuper) body += `\n*No Superpowers*`;
+  return body;
 }
 
 function updateSQL() {

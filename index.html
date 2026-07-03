@@ -1188,6 +1188,9 @@
       <button class="btn btn-block" onclick="openImportScenario()" title="Import a scenario from a CSV row">📥 Import Scenario</button>
     </div>
     <div class="btn-row">
+      <button class="btn btn-block" onclick="openImportPuzzle()" title="Import a puzzle from this tool's SQL output">📥 Import SQL</button>
+    </div>
+    <div class="btn-row">
       <button class="btn btn-danger btn-block" onclick="clearPuzzle()">🗑️ Clear Board</button>
     </div>
 
@@ -1358,6 +1361,24 @@
       <div class="ai-status" id="importChallengeStatus"></div>
       <div class="btn-row">
         <button class="btn btn-primary" onclick="importChallengeSQL()">Import</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Import Puzzle SQL Modal -->
+<div class="modal-overlay" id="importPuzzleOverlay" onclick="closeImportPuzzle(event)">
+  <div class="modal ai-modal" style="width:640px;">
+    <div class="modal-header">
+      <h3>📥 Import Puzzle SQL</h3>
+      <button class="modal-close" onclick="closeImportPuzzle()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px;">Paste the full SQL output from the Puzzle tab (optional Deck INSERTs + Scenario + DailyChallenge):</label>
+      <textarea id="importPuzzleInput" placeholder="-- Puzzle: ...&#10;INSERT INTO GameData.Scenario(...) VALUES(...);&#10;..." style="min-height:180px;"></textarea>
+      <div class="ai-status" id="importPuzzleStatus"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="importPuzzleSQL()">Import</button>
       </div>
     </div>
   </div>
@@ -4859,32 +4880,40 @@ function importScenarioCSV() {
   // Clear current state
   clearPuzzle();
 
-  // Populate sidebar fields
-  document.getElementById('puzzleScenarioId').value = scenarioId;
-  document.getElementById('puzzleMapId').value = mapId;
-  if (p0ProId && document.getElementById('puzzleP0ProSelect').querySelector(`option[value="${p0ProId}"]`)) {
-    document.getElementById('puzzleP0ProSelect').value = p0ProId;
-  }
-  if (p1ProId && document.getElementById('puzzleP1ProSelect').querySelector(`option[value="${p1ProId}"]`)) {
-    document.getElementById('puzzleP1ProSelect').value = p1ProId;
-  }
-  if (p0DeckId && p0DeckId !== '3703') document.getElementById('puzzleP0DeckId').value = p0DeckId;
-  if (p1DeckId && p1DeckId !== '3704') document.getElementById('puzzleP1DeckId').value = p1DeckId;
+  applyPuzzleScenarioData({ scenarioId, mapId, p0ProId, p1ProId, p0DeckId, p1DeckId, settings, startingCards });
 
-  // Settings fields
+  renderPuzzleBoard();
+  renderPuzzleHands();
+  renderPuzzleDecks();
+  updatePuzzleSQL();
+
+  closeImportScenario();
+  status.textContent = '';
+}
+
+// Shared: apply parsed scenario data (sidebar fields, Settings, StartingCards)
+// to the puzzle UI + state. Assumes clearPuzzle() was already called; does not render.
+function applyPuzzleScenarioData(d) {
+  const settings = d.settings || {};
+
+  if (d.scenarioId !== undefined) document.getElementById('puzzleScenarioId').value = d.scenarioId;
+  if (d.mapId !== undefined) document.getElementById('puzzleMapId').value = d.mapId;
+  if (d.p0ProId && document.getElementById('puzzleP0ProSelect').querySelector(`option[value="${d.p0ProId}"]`)) {
+    document.getElementById('puzzleP0ProSelect').value = d.p0ProId;
+  }
+  if (d.p1ProId && document.getElementById('puzzleP1ProSelect').querySelector(`option[value="${d.p1ProId}"]`)) {
+    document.getElementById('puzzleP1ProSelect').value = d.p1ProId;
+  }
+  if (d.p0DeckId && d.p0DeckId !== '3703') document.getElementById('puzzleP0DeckId').value = d.p0DeckId;
+  if (d.p1DeckId && d.p1DeckId !== '3704') document.getElementById('puzzleP1DeckId').value = d.p1DeckId;
+
   if (settings.NovasToWin) document.getElementById('puzzleNovasToWin').value = settings.NovasToWin;
   if (settings.BackgroundPath) document.getElementById('puzzleBackground').value = settings.BackgroundPath;
 
-  // First player
-  if (settings.FirstPlayerId === 0) {
-    document.getElementById('puzzleFirstPlayer').value = 'player';
-  } else if (settings.FirstPlayerId === 1) {
-    document.getElementById('puzzleFirstPlayer').value = 'bot';
-  } else {
-    document.getElementById('puzzleFirstPlayer').value = 'random';
-  }
+  if (settings.FirstPlayerId === 0) document.getElementById('puzzleFirstPlayer').value = 'player';
+  else if (settings.FirstPlayerId === 1) document.getElementById('puzzleFirstPlayer').value = 'bot';
+  else document.getElementById('puzzleFirstPlayer').value = 'random';
 
-  // Player settings
   if (settings.PlayerSettings && settings.PlayerSettings.length >= 2) {
     const ps0 = settings.PlayerSettings[0];
     const ps1 = settings.PlayerSettings[1];
@@ -4894,44 +4923,26 @@ function importScenarioCSV() {
     if (ps1.StartingCurrency !== undefined) document.getElementById('puzzleBotCurrency').value = ps1.StartingCurrency;
   }
 
-  // Activation levels from Script events
   if (settings.Script && settings.Script.Events) {
     for (const evt of settings.Script.Events) {
-      if (evt.Commands) {
-        for (const cmd of evt.Commands) {
-          if (cmd.Type === 'SetActivationLevelsCommand' && cmd.Levels && cmd.Levels.length === 4) {
-            for (let i = 0; i < 4; i++) {
-              document.getElementById(`actLevel${i}`).value = cmd.Levels[i];
-            }
-            break;
-          }
-        }
-      }
-    }
-
-    // Dialogue from ShowDialogueCommand
-    for (const evt of settings.Script.Events) {
-      if (evt.Commands) {
-        for (const cmd of evt.Commands) {
-          if (cmd.Type === 'ShowDialogueCommand') {
-            if (cmd.DialogueAsset) document.getElementById('puzzleDialogueAsset').value = cmd.DialogueAsset;
-            if (cmd.DialogueSpeaker) document.getElementById('puzzleDialogueSpeaker').value = cmd.DialogueSpeaker;
-            if (cmd.DialogueText) document.getElementById('puzzleDialogueText').value = cmd.DialogueText;
-          }
+      if (!evt.Commands) continue;
+      for (const cmd of evt.Commands) {
+        if (cmd.Type === 'SetActivationLevelsCommand' && cmd.Levels && cmd.Levels.length === 4) {
+          for (let i = 0; i < 4; i++) document.getElementById(`actLevel${i}`).value = cmd.Levels[i];
+        } else if (cmd.Type === 'ShowDialogueCommand') {
+          if (cmd.DialogueAsset) document.getElementById('puzzleDialogueAsset').value = cmd.DialogueAsset;
+          if (cmd.DialogueSpeaker) document.getElementById('puzzleDialogueSpeaker').value = cmd.DialogueSpeaker;
+          if (cmd.DialogueText) document.getElementById('puzzleDialogueText').value = cmd.DialogueText;
         }
       }
     }
   }
 
-  // Starting cards: populate board and hands
   const levelToRow = { P: 0, M: 1, L: 2, B: 3 };
-  for (const card of startingCards) {
+  for (const card of (d.startingCards || [])) {
     if (card.Location === 'Hand') {
-      if (card.Player === 0) {
-        puzzleState.playerHand.push(card.Card);
-      } else {
-        puzzleState.botHand.push(card.Card);
-      }
+      if (card.Player === 0) puzzleState.playerHand.push(card.Card);
+      else puzzleState.botHand.push(card.Card);
     } else if (card.Location === 'Board') {
       const row = levelToRow[card.Level];
       const col = card.Column;
@@ -4945,14 +4956,223 @@ function importScenarioCSV() {
       }
     }
   }
+}
 
-  renderPuzzleBoard();
-  renderPuzzleHands();
-  renderPuzzleDecks();
-  updatePuzzleSQL();
+// ---- Import Puzzle from full SQL output (reverse of generatePuzzleSQL) ----
+function openImportPuzzle() {
+  document.getElementById('importPuzzleOverlay').classList.add('active');
+  document.getElementById('importPuzzleInput').value = '';
+  document.getElementById('importPuzzleStatus').textContent = '';
+  document.getElementById('importPuzzleInput').focus();
+}
 
-  closeImportScenario();
-  status.textContent = '';
+function closeImportPuzzle(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('importPuzzleOverlay').classList.remove('active');
+}
+
+// Pull the contents of every single-quoted string literal out of a statement,
+// reversing the \' escaping. Used to locate JSON blobs regardless of INSERT/UPDATE form.
+function extractQuotedStrings(stmt) {
+  const out = [];
+  let i = 0;
+  while (i < stmt.length) {
+    if (stmt[i] === "'") {
+      i++;
+      let val = '';
+      while (i < stmt.length) {
+        if (stmt[i] === '\\' && i + 1 < stmt.length) { val += stmt[i + 1]; i += 2; }
+        else if (stmt[i] === "'") { i++; break; }
+        else { val += stmt[i]; i++; }
+      }
+      out.push(val);
+    } else i++;
+  }
+  return out;
+}
+
+// Get a single statement (marker → terminating ';'), respecting quotes.
+// markers is an array; picks the earliest occurring one.
+function getSqlStatement(sql, markers) {
+  let start = -1;
+  for (const m of markers) {
+    const mi = sql.indexOf(m);
+    if (mi !== -1 && (start === -1 || mi < start)) start = mi;
+  }
+  if (start === -1) return null;
+  let inStr = false;
+  for (let i = start; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inStr) { if (ch === '\\') i++; else if (ch === "'") inStr = false; }
+    else if (ch === "'") inStr = true;
+    else if (ch === ';') return sql.substring(start, i + 1);
+  }
+  return sql.substring(start);
+}
+
+// Get every statement matching any marker (for the 0-2 optional Deck statements).
+function getAllSqlStatements(sql, markers) {
+  const stmts = [];
+  for (const m of markers) {
+    let from = 0;
+    while (true) {
+      const mi = sql.indexOf(m, from);
+      if (mi === -1) break;
+      let inStr = false, end = sql.length;
+      for (let i = mi; i < sql.length; i++) {
+        const ch = sql[i];
+        if (inStr) { if (ch === '\\') i++; else if (ch === "'") inStr = false; }
+        else if (ch === "'") inStr = true;
+        else if (ch === ';') { end = i + 1; break; }
+      }
+      stmts.push(sql.substring(mi, end));
+      from = end;
+    }
+  }
+  return stmts;
+}
+
+// From a statement's quoted literals, classify JSON blobs: first object = Settings,
+// first array = StartingCards. Non-JSON literals (names, dates) are skipped.
+function classifyJsonBlobs(stmt) {
+  let settings = null, startingCards = null;
+  for (const s of extractQuotedStrings(stmt)) {
+    let v;
+    try { v = JSON.parse(s); } catch (e) { continue; }
+    if (Array.isArray(v)) { if (startingCards === null) startingCards = v; }
+    else if (v && typeof v === 'object') { if (settings === null) settings = v; }
+  }
+  return { settings, startingCards };
+}
+
+// A deck statement's Cards array = its first non-empty JSON array literal
+// (Superpowers is always '[]').
+function extractDeckCards(stmt) {
+  let fallback = null;
+  for (const s of extractQuotedStrings(stmt)) {
+    let v;
+    try { v = JSON.parse(s); } catch (e) { continue; }
+    if (Array.isArray(v)) {
+      if (v.length > 0) return v.map(Number);
+      if (fallback === null) fallback = v;
+    }
+  }
+  return fallback ? fallback.map(Number) : [];
+}
+
+// Parse the "-- SOLUTION" comment block, if present.
+function parseSolutionComment(raw) {
+  const lines = raw.split('\n');
+  let i = 0;
+  while (i < lines.length && !/^--\s*SOLUTION/i.test(lines[i].trim())) i++;
+  if (i >= lines.length) return null;
+  i++; // skip the SOLUTION header line
+  if (i < lines.length && /^--\s*=+/.test(lines[i].trim())) i++; // skip divider
+  let difficulty = '';
+  const hint = [], math = [];
+  let mode = 'hint';
+  for (; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t.startsWith('--')) break; // end of comment block
+    const content = t.replace(/^--\s?/, '');
+    if (/^Difficulty:\s*/i.test(content)) { difficulty = content.replace(/^Difficulty:\s*/i, '').trim(); continue; }
+    if (/^Math verification:/i.test(content)) { mode = 'math'; continue; }
+    if (content === '') continue;
+    if (mode === 'hint') hint.push(content); else math.push(content);
+  }
+  return { hint: hint.join('\n'), math: math.join('\n'), difficulty };
+}
+
+function importPuzzleSQL() {
+  const raw = document.getElementById('importPuzzleInput').value.trim();
+  const status = document.getElementById('importPuzzleStatus');
+  if (!raw) { status.textContent = 'Please paste the puzzle SQL.'; return; }
+
+  try {
+    // Strip comment lines so quote-tracking during statement parsing is clean.
+    const sql = raw.split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
+
+    // --- Scenario (INSERT or UPDATE) ---
+    const scenStmt = getSqlStatement(sql, ['INSERT INTO GameData.Scenario', 'UPDATE GameData.Scenario']);
+    if (!scenStmt) throw new Error('Could not find the Scenario statement.');
+    const isUpdate = /^\s*UPDATE/i.test(scenStmt);
+
+    const { settings, startingCards } = classifyJsonBlobs(scenStmt);
+    if (!settings) throw new Error('Could not parse the Settings JSON.');
+
+    let mapId = 2, p0ProId = 2, p1ProId = 7, p0DeckRef = '', p1DeckRef = '', scenarioId = '';
+    if (isUpdate) {
+      const g = (re, def) => { const m = scenStmt.match(re); return m ? m[1].trim() : def; };
+      mapId = parseInt(g(/MapId\s*=\s*(\d+)/, '2')) || 2;
+      p0ProId = parseInt(g(/P0ProfessionalID\s*=\s*(\d+)/, '2')) || 2;
+      p1ProId = parseInt(g(/P1ProfessionalID\s*=\s*(\d+)/, '7')) || 7;
+      p0DeckRef = g(/P0DeckID\s*=\s*([^,]+)/, '');
+      p1DeckRef = g(/P1DeckID\s*=\s*([^,]+)/, '');
+      scenarioId = g(/WHERE\s+ID\s*=\s*(\d+)/i, '');
+    } else {
+      const res = extractValuesAt(scenStmt, 0);
+      if (!res) throw new Error('Could not parse the Scenario VALUES.');
+      let a = splitSqlArgs(res.content);
+      if (a.length >= 16) { scenarioId = a[0].trim(); a = a.slice(1); } // leading ID present
+      mapId = parseInt(a[4]) || 2;
+      p0ProId = parseInt(a[7]) || 2;
+      p1ProId = parseInt(a[8]) || 7;
+      p0DeckRef = (a[9] || '').trim();
+      p1DeckRef = (a[11] || '').trim();
+    }
+    const cleanDeckId = ref => (/^\d+$/.test(ref) ? ref : '');
+    const p0DeckId = cleanDeckId(p0DeckRef);
+    const p1DeckId = cleanDeckId(p1DeckRef);
+
+    // --- Decks (0-2, INSERT or UPDATE) ---
+    const deckStmts = getAllSqlStatements(sql, ['INSERT INTO GameData.Deck', 'UPDATE GameData.Deck']);
+    let playerDeck = [], botDeck = [];
+    for (const st of deckStmts) {
+      const cards = extractDeckCards(st);
+      if (/'\s*player\s*'|=\s*'player'/i.test(st) || st.includes("'player'")) playerDeck = cards;
+      else if (st.includes("'bot'")) botDeck = cards;
+    }
+
+    // --- Daily Challenge (TTL + art) ---
+    let ttl = '', art = '';
+    const dcStmt = getSqlStatement(sql, ['INSERT INTO GameData.DailyChallenge']);
+    if (dcStmt) {
+      const res = extractValuesAt(dcStmt, 0);
+      if (res) {
+        const df = splitSqlArgs(res.content);
+        ttl = stripSqlQuotes(df[0]);
+        art = stripSqlQuotes(df[4]);
+      }
+    }
+
+    // --- Solution comment block ---
+    const solution = parseSolutionComment(raw);
+
+    // --- Apply ---
+    clearPuzzle();
+    applyPuzzleScenarioData({ scenarioId, mapId, p0ProId, p1ProId, p0DeckId, p1DeckId, settings, startingCards });
+    puzzleState.playerDeck = playerDeck;
+    puzzleState.botDeck = botDeck;
+    if (solution) {
+      puzzleState.solutionHint = solution.hint;
+      puzzleState.solutionMath = solution.math;
+      puzzleState.difficulty = solution.difficulty;
+    }
+    const artMatch = art.match(/^CardSprites\[(.+)\]$/);
+    puzzleState.artCard = artMatch ? (findCardByName(artMatch[1]) || null) : null;
+    if (ttl) document.getElementById('puzzleTtlInput').value = ttl.replace(' ', 'T').slice(0, 16);
+
+    renderPuzzleBoard();
+    renderPuzzleHands();
+    renderPuzzleDecks();
+    renderPuzzleArtCard();
+    updatePuzzleSQL();
+
+    closeImportPuzzle();
+    showToast('Puzzle imported');
+  } catch (err) {
+    status.textContent = 'Import failed: ' + err.message;
+  }
 }
 
 // ---- Import Deck ----

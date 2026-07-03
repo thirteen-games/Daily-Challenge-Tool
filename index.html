@@ -969,6 +969,9 @@
     <div class="btn-row">
       <button class="btn btn-block" onclick="openSlotBuilder()" style="border-color:var(--accent2);color:var(--accent2);">🧱 Slot Builder</button>
     </div>
+    <div class="btn-row">
+      <button class="btn btn-block" onclick="openImportChallenge()" title="Import a challenge from this tool's SQL output">📥 Import SQL</button>
+    </div>
   </div>
 
   <!-- DECK PANELS -->
@@ -1337,6 +1340,24 @@
       <div class="ai-status" id="importDeckStatus"></div>
       <div class="btn-row">
         <button class="btn btn-primary" onclick="importDeckCSV()">Import</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Import Challenge SQL Modal -->
+<div class="modal-overlay" id="importChallengeOverlay" onclick="closeImportChallenge(event)">
+  <div class="modal ai-modal" style="width:640px;">
+    <div class="modal-header">
+      <h3>📥 Import Challenge SQL</h3>
+      <button class="modal-close" onclick="closeImportChallenge()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px;">Paste the full SQL output from the Challenge tab (Deck + Scenario + DailyChallenge INSERTs):</label>
+      <textarea id="importChallengeInput" placeholder="-- Daily Challenge: ...&#10;INSERT INTO GameData.Deck(...) VALUES(...);&#10;..." style="min-height:180px;"></textarea>
+      <div class="ai-status" id="importChallengeStatus"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="importChallengeSQL()">Import</button>
       </div>
     </div>
   </div>
@@ -2226,6 +2247,250 @@ function clearArtCard() {
   state.artCard = null;
   renderArtCard();
   updateSQL();
+}
+
+// ============================================================
+// IMPORT CHALLENGE SQL (reverse of generateSQL)
+// ============================================================
+
+function openImportChallenge() {
+  document.getElementById('importChallengeOverlay').classList.add('active');
+  document.getElementById('importChallengeInput').value = '';
+  document.getElementById('importChallengeStatus').textContent = '';
+  document.getElementById('importChallengeInput').focus();
+}
+
+function closeImportChallenge(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('importChallengeOverlay').classList.remove('active');
+}
+
+// Split a SQL VALUES(...) argument list on top-level commas, respecting
+// single-quoted strings (with \' escapes). String args keep their surrounding quotes.
+function splitSqlArgs(str) {
+  const args = [];
+  let cur = '';
+  let inStr = false;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (inStr) {
+      if (ch === '\\' && i + 1 < str.length) { cur += str[i + 1]; i++; }
+      else if (ch === "'") { inStr = false; cur += ch; }
+      else cur += ch;
+    } else {
+      if (ch === "'") { inStr = true; cur += ch; }
+      else if (ch === ',') { args.push(cur.trim()); cur = ''; }
+      else cur += ch;
+    }
+  }
+  if (cur.trim() !== '') args.push(cur.trim());
+  return args;
+}
+
+// From `fromIndex`, find the next VALUES( ... ) and return its inner content +
+// the index just past the closing paren. Respects quotes and nested parens.
+function extractValuesAt(sql, fromIndex) {
+  if (fromIndex < 0) return null;
+  const vi = sql.indexOf('VALUES', fromIndex);
+  if (vi === -1) return null;
+  const open = sql.indexOf('(', vi);
+  if (open === -1) return null;
+  let depth = 0, inStr = false;
+  for (let i = open; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inStr) {
+      if (ch === '\\') i++;
+      else if (ch === "'") inStr = false;
+    } else {
+      if (ch === "'") inStr = true;
+      else if (ch === '(') depth++;
+      else if (ch === ')') { depth--; if (depth === 0) return { content: sql.substring(open + 1, i), endIndex: i + 1 }; }
+    }
+  }
+  return null;
+}
+
+function stripSqlQuotes(a) {
+  a = a.trim();
+  if (a.length >= 2 && a.startsWith("'") && a.endsWith("'")) return a.slice(1, -1);
+  return a;
+}
+
+function findCardByName(name) {
+  for (const c of [...FRIEND_CARDS, ...POWER_CARDS, ...SUPERPOWER_CARDS]) {
+    if (c.name === name) return c;
+  }
+  return null;
+}
+
+function applyImportedPlayerSettings(side, ps) {
+  state[side].noSuper = false;
+  state[side].superOrder = [];
+  if (!ps) return;
+  if (ps.OverrideSuperpowers) {
+    if (Array.isArray(ps.SuperpowerOrder) && ps.SuperpowerOrder.length > 0) {
+      state[side].superOrder = [...ps.SuperpowerOrder];
+    } else {
+      state[side].noSuper = true;
+    }
+  }
+}
+
+// After state[side].superpowers is set, select the matching loadout in the dropdown.
+function selectLoadoutInDropdown(side) {
+  const loadouts = getSuperpowerLoadouts(state[side].proId);
+  const target = [...state[side].superpowers].sort((a, b) => a - b).join(',');
+  const idx = loadouts.findIndex(lo => [...lo].sort((a, b) => a - b).join(',') === target);
+  if (idx >= 0) document.getElementById(side + 'SpSelect').value = idx;
+}
+
+function importChallengeSQL() {
+  const raw = document.getElementById('importChallengeInput').value.trim();
+  const status = document.getElementById('importChallengeStatus');
+  if (!raw) { status.textContent = 'Please paste the challenge SQL.'; return; }
+
+  try {
+    // --- Decks (player + bot) ---
+    const deckFields = [];
+    let idx = 0;
+    while (true) {
+      const mi = raw.indexOf('INSERT INTO GameData.Deck', idx);
+      if (mi === -1) break;
+      const res = extractValuesAt(raw, mi);
+      if (!res) break;
+      deckFields.push(splitSqlArgs(res.content));
+      idx = res.endIndex;
+    }
+    if (deckFields.length < 2) throw new Error('Expected 2 Deck INSERTs (player + bot).');
+
+    // Match by Description ('player' / 'bot'); fall back to order.
+    let p0f = deckFields.find(f => stripSqlQuotes(f[1]).toLowerCase() === 'player');
+    let p1f = deckFields.find(f => stripSqlQuotes(f[1]).toLowerCase() === 'bot');
+    if (!p0f) p0f = deckFields[0];
+    if (!p1f) p1f = deckFields[1];
+
+    // --- Scenario ---
+    const scen = extractValuesAt(raw, raw.indexOf('INSERT INTO GameData.Scenario'));
+    if (!scen) throw new Error('Could not find the Scenario INSERT.');
+    const sf = splitSqlArgs(scen.content);
+    // 0 Active, 1 Name, 2 Desc, 3 Hint, 4 MapId, 5 Mirror, 6 TeamBuilder,
+    // 7 P0Pro, 8 P1Pro, 9 P0Deck, 10 P0Cat, 11 P1Deck, 12 P1Cat, 13 Settings, 14 StartingCards
+    const mapId = parseInt(sf[4]) || 2;
+    const mirror = sf[5].trim() === '1';
+    const scenP0Pro = parseInt(sf[7]);
+    const scenP1Pro = parseInt(sf[8]);
+    const settings = JSON.parse(stripSqlQuotes(sf[13]));
+    const startingCardsRaw = stripSqlQuotes(sf[14]);
+    let boardCards = [];
+    if (startingCardsRaw && startingCardsRaw !== 'null') boardCards = JSON.parse(startingCardsRaw);
+
+    // --- Daily Challenge ---
+    const dc = extractValuesAt(raw, raw.indexOf('INSERT INTO GameData.DailyChallenge'));
+    let ttl = '', title = '', body = '', art = '';
+    if (dc) {
+      const df = splitSqlArgs(dc.content);
+      // 0 TTL, 1 Active, 2 Title, 3 Body, 4 Art, 5 ScenarioID
+      ttl = stripSqlQuotes(df[0]);
+      title = stripSqlQuotes(df[2]);
+      body = stripSqlQuotes(df[3]);
+      art = stripSqlQuotes(df[4]);
+    }
+
+    // --- Resolve values ---
+    const p0ProId = scenP0Pro || parseInt(p0f[5]) || 2;
+    const p1ProId = scenP1Pro || parseInt(p1f[5]) || 7;
+    const p0CardIds = JSON.parse(stripSqlQuotes(p0f[2]));
+    const p1CardIds = JSON.parse(stripSqlQuotes(p1f[2]));
+    const p0Sps = JSON.parse(stripSqlQuotes(p0f[3]));
+    const p1Sps = JSON.parse(stripSqlQuotes(p1f[3]));
+
+    // --- Apply to state ---
+    // Pros (set select values if the option exists)
+    state.p0.proId = p0ProId;
+    state.p1.proId = p1ProId;
+    if (PROFESSIONALS[p0ProId]) document.getElementById('p0ProSelect').value = p0ProId;
+    if (PROFESSIONALS[p1ProId]) document.getElementById('p1ProSelect').value = p1ProId;
+
+    // Decks
+    state.p0.cards = p0CardIds.map(id => ALL_CARDS[id]).filter(Boolean);
+    state.p1.cards = p1CardIds.map(id => ALL_CARDS[id]).filter(Boolean);
+    state.p0.superpowers = p0Sps;
+    state.p1.superpowers = p1Sps;
+
+    // Player settings (currency + superpower overrides)
+    const psArr = settings.PlayerSettings || [];
+    applyImportedPlayerSettings('p0', psArr[0]);
+    applyImportedPlayerSettings('p1', psArr[1]);
+    const startCurrency = (psArr[0] && psArr[0].StartingCurrency !== undefined) ? psArr[0].StartingCurrency : 1;
+
+    // Board
+    state.board = Array.from({ length: 4 }, () => Array(4).fill(null));
+    const levelToRow = { P: 0, M: 1, L: 2, B: 3 };
+    for (const c of boardCards) {
+      const row = levelToRow[c.Level];
+      const col = c.Column;
+      if (row !== undefined && col >= 0 && col < 4) {
+        const cell = { cardId: c.Card, player: c.Player };
+        if (c.Status) {
+          if (c.Status.CurrentHealth !== undefined) cell.hp = c.Status.CurrentHealth;
+          if (c.Status.IsGlitched) cell.glitched = true;
+        }
+        state.board[row][col] = cell;
+      }
+    }
+
+    // Card art
+    const artMatch = art.match(/^CardSprites\[(.+)\]$/);
+    state.artCard = artMatch ? (findCardByName(artMatch[1]) || null) : null;
+
+    // Sidebar fields
+    document.getElementById('challengeTitle').value = title;
+    document.getElementById('challengeBody').value = body;
+    document.getElementById('mapId').value = mapId;
+    document.getElementById('novasToWin').value = settings.NovasToWin || 20;
+    document.getElementById('startingCurrency').value = startCurrency;
+    document.getElementById('mirrorMatch').checked = mirror;
+    const skipDraft = !!settings.SkipDrafting;
+    document.getElementById('skipDrafting').checked = skipDraft;
+    if (skipDraft && settings.StartingCards !== undefined) {
+      document.getElementById('startingCards').value = settings.StartingCards;
+    }
+    document.getElementById('startingCardsGroup').style.display = skipDraft ? '' : 'none';
+    if (settings.FirstPlayerId === 0) document.getElementById('firstPlayer').value = 'player';
+    else if (settings.FirstPlayerId === 1) document.getElementById('firstPlayer').value = 'bot';
+    else document.getElementById('firstPlayer').value = 'random';
+    if (ttl) document.getElementById('ttlInput').value = ttl.replace(' ', 'T').slice(0, 16);
+
+    // Rebuild superpower dropdowns for the imported pros, then reflect selections
+    updateSpSelect('p0');
+    updateSpSelect('p1');
+    selectLoadoutInDropdown('p0');
+    selectLoadoutInDropdown('p1');
+
+    // Render everything
+    renderDeck('p0');
+    renderDeck('p1');
+    renderSp('p0');
+    renderSp('p1');
+    renderSuperOrder('p0');
+    renderSuperOrder('p1');
+    // Expand the starting-board section if the import placed any cards
+    if (boardCards.length > 0) {
+      const boardContent = document.getElementById('challengeBoardContent');
+      if (boardContent.style.display === 'none') {
+        boardContent.style.display = '';
+        document.getElementById('challengeBoardChevron').style.transform = 'rotate(90deg)';
+      }
+    }
+    renderChallengeBoard();
+    renderArtCard();
+    updateSQL();
+
+    closeImportChallenge();
+    showToast('Challenge imported');
+  } catch (err) {
+    status.textContent = 'Import failed: ' + err.message;
+  }
 }
 
 // ============================================================

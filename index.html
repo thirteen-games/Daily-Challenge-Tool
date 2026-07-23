@@ -304,6 +304,47 @@
     margin-bottom: 8px;
   }
   .sql-header h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .overwrite-check {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .overwrite-check input { accent-color: var(--accent); cursor: pointer; }
+  .overwrite-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .overwrite-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  .overwrite-row input {
+    width: 80px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 4px 6px;
+    font-size: 12px;
+  }
+  .overwrite-row input:focus { outline: none; border-color: var(--accent); }
   .sql-output {
     flex: 1;
     background: var(--input-bg);
@@ -1058,8 +1099,17 @@
       <h3>SQL Output</h3>
       <div style="display:flex;align-items:center;gap:6px;">
         <span class="copy-feedback" id="copyFeedback">Copied!</span>
+        <label class="overwrite-check" title="Generate UPDATE statements targeting existing database IDs instead of INSERTs">
+          <input type="checkbox" id="overwriteIdsCheck" onchange="toggleOverwriteIds()"> Overwrite IDs
+        </label>
         <button class="btn btn-sm btn-primary" onclick="copySQL()">📋 Copy SQL</button>
       </div>
+    </div>
+    <div class="overwrite-row" id="overwriteIdsRow" style="display:none;">
+      <label>Player Deck ID <input type="number" id="owP0DeckId" min="1" placeholder="—" oninput="updateSQL()"></label>
+      <label>Bot Deck ID <input type="number" id="owP1DeckId" min="1" placeholder="—" oninput="updateSQL()"></label>
+      <label>Scenario ID <input type="number" id="owScenarioId" min="1" placeholder="—" oninput="updateSQL()"></label>
+      <label>Daily Challenge ID <input type="number" id="owDailyId" min="1" placeholder="—" oninput="updateSQL()"></label>
     </div>
     <div class="sql-output" id="sqlOutput">Click "Randomize All" to generate a challenge...</div>
   </div>
@@ -2337,6 +2387,68 @@ function stripSqlQuotes(a) {
   return a;
 }
 
+// Find `token` in `sql` at or after `fromIndex`, skipping single-quoted strings.
+function findTokenOutsideQuotes(sql, token, fromIndex) {
+  let inStr = false;
+  for (let i = fromIndex; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inStr) {
+      if (ch === '\\') i++;
+      else if (ch === "'") inStr = false;
+    } else {
+      if (ch === "'") inStr = true;
+      else if (sql.startsWith(token, i)) return i;
+    }
+  }
+  return -1;
+}
+
+// Parse "Col1=v1, Col2=v2, ..." into a {column: rawValue} map (quotes kept on strings).
+function parseSetClause(str) {
+  const map = {};
+  for (const part of splitSqlArgs(str)) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    map[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+  }
+  return map;
+}
+
+// Find the next INSERT or UPDATE statement for GameData.<table> at or after `fromIndex`.
+// Returns { fields, id, endIndex } where `fields` is the raw values in `columns` order
+// (INSERTs are assumed to list values in `columns` order, matching this tool's output)
+// and `id` is the WHERE ID from an UPDATE, or null for an INSERT.
+function extractTableStatement(raw, table, columns, fromIndex) {
+  const insIdx = raw.indexOf('INSERT INTO GameData.' + table, fromIndex);
+  const updMatch = new RegExp('UPDATE\\s+GameData\\.' + table + '\\b').exec(raw.slice(fromIndex));
+  const updIdx = updMatch ? fromIndex + updMatch.index : -1;
+  let isUpdate;
+  if (insIdx === -1 && updIdx === -1) return null;
+  if (insIdx === -1) isUpdate = true;
+  else if (updIdx === -1) isUpdate = false;
+  else isUpdate = updIdx < insIdx;
+
+  if (!isUpdate) {
+    const res = extractValuesAt(raw, insIdx);
+    if (!res) return null;
+    return { fields: splitSqlArgs(res.content), id: null, endIndex: res.endIndex };
+  }
+
+  const setIdx = raw.indexOf('SET ', updIdx);
+  if (setIdx === -1) return null;
+  const whereIdx = findTokenOutsideQuotes(raw, 'WHERE', setIdx);
+  if (whereIdx === -1) return null;
+  const semiIdx = raw.indexOf(';', whereIdx);
+  const map = parseSetClause(raw.substring(setIdx + 4, whereIdx));
+  const idMatch = raw.substring(whereIdx, semiIdx === -1 ? raw.length : semiIdx).match(/ID\s*=\s*(\d+)/i);
+  const fields = columns.map(c => map[c] !== undefined ? map[c] : 'NULL');
+  return {
+    fields,
+    id: idMatch ? parseInt(idMatch[1]) : null,
+    endIndex: semiIdx === -1 ? raw.length : semiIdx + 1,
+  };
+}
+
 function findCardByName(name) {
   for (const c of [...FRIEND_CARDS, ...POWER_CARDS, ...SUPERPOWER_CARDS]) {
     if (c.name === name) return c;
@@ -2371,29 +2483,33 @@ function importChallengeSQL() {
   if (!raw) { status.textContent = 'Please paste the challenge SQL.'; return; }
 
   try {
-    // --- Decks (player + bot) ---
-    const deckFields = [];
+    const DECK_COLS = ['Name', 'Description', 'Cards', 'Superpowers', 'DeckCategoryID', 'ProfessionalID'];
+    const SCENARIO_COLS = ['Active', 'Name', 'Description', 'Hint', 'MapId', 'MirrorMatch', 'TeamBuilderDeckID',
+      'P0ProfessionalID', 'P1ProfessionalID', 'P0DeckID', 'P0DeckCategoryID', 'P1DeckID', 'P1DeckCategoryID', 'Settings', 'StartingCards'];
+    const DC_COLS = ['TimeToLive', 'Active', 'Title', 'Body', 'AssetKeyArt', 'ScenarioID'];
+
+    // --- Decks (player + bot); INSERT or UPDATE form ---
+    const decks = [];
     let idx = 0;
     while (true) {
-      const mi = raw.indexOf('INSERT INTO GameData.Deck', idx);
-      if (mi === -1) break;
-      const res = extractValuesAt(raw, mi);
+      const res = extractTableStatement(raw, 'Deck', DECK_COLS, idx);
       if (!res) break;
-      deckFields.push(splitSqlArgs(res.content));
+      decks.push(res);
       idx = res.endIndex;
     }
-    if (deckFields.length < 2) throw new Error('Expected 2 Deck INSERTs (player + bot).');
+    if (decks.length < 2) throw new Error('Expected 2 Deck statements (player + bot).');
 
     // Match by Description ('player' / 'bot'); fall back to order.
-    let p0f = deckFields.find(f => stripSqlQuotes(f[1]).toLowerCase() === 'player');
-    let p1f = deckFields.find(f => stripSqlQuotes(f[1]).toLowerCase() === 'bot');
-    if (!p0f) p0f = deckFields[0];
-    if (!p1f) p1f = deckFields[1];
+    let p0d = decks.find(d => stripSqlQuotes(d.fields[1]).toLowerCase() === 'player');
+    let p1d = decks.find(d => stripSqlQuotes(d.fields[1]).toLowerCase() === 'bot');
+    if (!p0d) p0d = decks[0];
+    if (!p1d) p1d = decks[1];
+    const p0f = p0d.fields, p1f = p1d.fields;
 
     // --- Scenario ---
-    const scen = extractValuesAt(raw, raw.indexOf('INSERT INTO GameData.Scenario'));
-    if (!scen) throw new Error('Could not find the Scenario INSERT.');
-    const sf = splitSqlArgs(scen.content);
+    const scen = extractTableStatement(raw, 'Scenario', SCENARIO_COLS, 0);
+    if (!scen) throw new Error('Could not find the Scenario statement.');
+    const sf = scen.fields;
     // 0 Active, 1 Name, 2 Desc, 3 Hint, 4 MapId, 5 Mirror, 6 TeamBuilder,
     // 7 P0Pro, 8 P1Pro, 9 P0Deck, 10 P0Cat, 11 P1Deck, 12 P1Cat, 13 Settings, 14 StartingCards
     const mapId = parseInt(sf[4]) || 2;
@@ -2406,10 +2522,10 @@ function importChallengeSQL() {
     if (startingCardsRaw && startingCardsRaw !== 'null') boardCards = JSON.parse(startingCardsRaw);
 
     // --- Daily Challenge ---
-    const dc = extractValuesAt(raw, raw.indexOf('INSERT INTO GameData.DailyChallenge'));
+    const dc = extractTableStatement(raw, 'DailyChallenge', DC_COLS, 0);
     let ttl = '', title = '', body = '', art = '';
     if (dc) {
-      const df = splitSqlArgs(dc.content);
+      const df = dc.fields;
       // 0 TTL, 1 Active, 2 Title, 3 Body, 4 Art, 5 ScenarioID
       ttl = stripSqlQuotes(df[0]);
       title = stripSqlQuotes(df[2]);
@@ -2503,6 +2619,12 @@ function importChallengeSQL() {
         document.getElementById('challengeBoardChevron').style.transform = 'rotate(90deg)';
       }
     }
+    // Overwrite-ID fields default to the imported IDs (blank when the import had none)
+    document.getElementById('owP0DeckId').value = p0d.id != null ? p0d.id : '';
+    document.getElementById('owP1DeckId').value = p1d.id != null ? p1d.id : '';
+    document.getElementById('owScenarioId').value = scen.id != null ? scen.id : '';
+    document.getElementById('owDailyId').value = (dc && dc.id != null) ? dc.id : '';
+
     renderChallengeBoard();
     renderArtCard();
     updateSQL();
@@ -2613,33 +2735,101 @@ function generateSQL() {
   const eArt = escapeSQL(assetKeyArt);
   const eSettings = escapeSQL(settingsJSON);
 
+  // Overwrite mode: emit UPDATEs targeting existing IDs (per table, only when an ID is filled in)
+  const owP0Deck = getOverwriteId('owP0DeckId');
+  const owP1Deck = getOverwriteId('owP1DeckId');
+  const owScenario = getOverwriteId('owScenarioId');
+  const owDaily = getOverwriteId('owDailyId');
+  const p0DeckRef = owP0Deck ? String(owP0Deck) : '@p0_deck_id';
+  const p1DeckRef = owP1Deck ? String(owP1Deck) : '@p1_deck_id';
+  const scenarioRef = owScenario ? String(owScenario) : '@scenario_id';
+
   const lines = [
     `-- ========================================`,
     `-- Daily Challenge: ${title}`,
     `-- ========================================`,
     ``,
-    `-- Player Deck`,
-    `INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`,
-    `VALUES('${eName}', 'player', '${p0Cards}', '${p0Sp}', 0, ${state.p0.proId});`,
-    `SET @p0_deck_id = LAST_INSERT_ID();`,
-    ``,
-    `-- Bot Deck`,
-    `INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`,
-    `VALUES('${eName}', 'bot', '${p1Cards}', '${p1Sp}', 0, ${state.p1.proId});`,
-    `SET @p1_deck_id = LAST_INSERT_ID();`,
-    ``,
-    `-- Scenario`,
-    `INSERT INTO GameData.Scenario(Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`,
-    `VALUES(1, '${eName}', NULL, NULL, ${mapId}, ${mirror ? 1 : 0}, 0, ${state.p0.proId}, ${state.p1.proId}, @p0_deck_id, 0, @p1_deck_id, 0, '${eSettings}', ${startingCardsSQL});`,
-    `SET @scenario_id = LAST_INSERT_ID();`,
-    ``,
-    `-- Daily Challenge`,
-    `INSERT INTO GameData.DailyChallenge(TimeToLive, Active, Title, Body, AssetKeyArt, ScenarioID)`,
-    `VALUES('${ttl}', 1, '${eName}', '${eBody}', '${eArt}', @scenario_id);`,
-    ``,
   ];
 
+  lines.push(`-- Player Deck${owP0Deck ? ` (overwrite ID ${owP0Deck})` : ''}`);
+  if (owP0Deck) {
+    lines.push(
+      `UPDATE GameData.Deck`,
+      `SET Name='${eName}', Description='player', Cards='${p0Cards}', Superpowers='${p0Sp}', DeckCategoryID=0, ProfessionalID=${state.p0.proId}`,
+      `WHERE ID=${owP0Deck};`,
+    );
+  } else {
+    lines.push(
+      `INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`,
+      `VALUES('${eName}', 'player', '${p0Cards}', '${p0Sp}', 0, ${state.p0.proId});`,
+      `SET @p0_deck_id = LAST_INSERT_ID();`,
+    );
+  }
+  lines.push(``);
+
+  lines.push(`-- Bot Deck${owP1Deck ? ` (overwrite ID ${owP1Deck})` : ''}`);
+  if (owP1Deck) {
+    lines.push(
+      `UPDATE GameData.Deck`,
+      `SET Name='${eName}', Description='bot', Cards='${p1Cards}', Superpowers='${p1Sp}', DeckCategoryID=0, ProfessionalID=${state.p1.proId}`,
+      `WHERE ID=${owP1Deck};`,
+    );
+  } else {
+    lines.push(
+      `INSERT INTO GameData.Deck(Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)`,
+      `VALUES('${eName}', 'bot', '${p1Cards}', '${p1Sp}', 0, ${state.p1.proId});`,
+      `SET @p1_deck_id = LAST_INSERT_ID();`,
+    );
+  }
+  lines.push(``);
+
+  lines.push(`-- Scenario${owScenario ? ` (overwrite ID ${owScenario})` : ''}`);
+  if (owScenario) {
+    lines.push(
+      `UPDATE GameData.Scenario`,
+      `SET Active=1, Name='${eName}', Description=NULL, Hint=NULL, MapId=${mapId}, MirrorMatch=${mirror ? 1 : 0}, TeamBuilderDeckID=0, P0ProfessionalID=${state.p0.proId}, P1ProfessionalID=${state.p1.proId}, P0DeckID=${p0DeckRef}, P0DeckCategoryID=0, P1DeckID=${p1DeckRef}, P1DeckCategoryID=0, Settings='${eSettings}', StartingCards=${startingCardsSQL}`,
+      `WHERE ID=${owScenario};`,
+    );
+  } else {
+    lines.push(
+      `INSERT INTO GameData.Scenario(Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID, P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID, P1DeckID, P1DeckCategoryID, Settings, StartingCards)`,
+      `VALUES(1, '${eName}', NULL, NULL, ${mapId}, ${mirror ? 1 : 0}, 0, ${state.p0.proId}, ${state.p1.proId}, ${p0DeckRef}, 0, ${p1DeckRef}, 0, '${eSettings}', ${startingCardsSQL});`,
+      `SET @scenario_id = LAST_INSERT_ID();`,
+    );
+  }
+  lines.push(``);
+
+  lines.push(`-- Daily Challenge${owDaily ? ` (overwrite ID ${owDaily})` : ''}`);
+  if (owDaily) {
+    lines.push(
+      `UPDATE GameData.DailyChallenge`,
+      `SET TimeToLive='${ttl}', Active=1, Title='${eName}', Body='${eBody}', AssetKeyArt='${eArt}', ScenarioID=${scenarioRef}`,
+      `WHERE ID=${owDaily};`,
+    );
+  } else {
+    lines.push(
+      `INSERT INTO GameData.DailyChallenge(TimeToLive, Active, Title, Body, AssetKeyArt, ScenarioID)`,
+      `VALUES('${ttl}', 1, '${eName}', '${eBody}', '${eArt}', ${scenarioRef});`,
+    );
+  }
+  lines.push(``);
+
   return lines.join('\n');
+}
+
+// Read one overwrite-ID input; returns a positive integer or null.
+// Null when overwrite mode is off, the field is blank, or the value is invalid —
+// in all those cases the table falls back to a plain INSERT.
+function getOverwriteId(inputId) {
+  if (!document.getElementById('overwriteIdsCheck').checked) return null;
+  const v = parseInt(document.getElementById(inputId).value);
+  return v > 0 ? v : null;
+}
+
+function toggleOverwriteIds() {
+  const on = document.getElementById('overwriteIdsCheck').checked;
+  document.getElementById('overwriteIdsRow').style.display = on ? '' : 'none';
+  updateSQL();
 }
 
 function autoTitle() {
@@ -2667,7 +2857,7 @@ function highlightSQL(sql) {
   return sql
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/(--[^\n]*)/g, '<span class="comment">$1</span>')
-    .replace(/\b(INSERT INTO|VALUES|SET|NULL)\b/g, '<span class="keyword">$1</span>')
+    .replace(/\b(INSERT INTO|UPDATE|VALUES|SET|WHERE|NULL)\b/g, '<span class="keyword">$1</span>')
     .replace(/(@\w+)/g, '<span class="var">$1</span>')
     .replace(/(LAST_INSERT_ID\(\))/g, '<span class="var">$1</span>');
 }

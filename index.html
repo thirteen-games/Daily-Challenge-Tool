@@ -489,6 +489,7 @@
   .modal-item .type-dot.friend { background: var(--friend); }
   .modal-item .type-dot.power { background: var(--power); }
   .modal-item .type-dot.super { background: #f39c12; }
+  .modal-item .type-dot.pro { background: var(--accent2); }
   .modal-item .id-label {
     color: var(--text-dim);
     font-size: 11px;
@@ -578,6 +579,19 @@
     z-index: 2000;
   }
   .toast.show { opacity: 1; transform: translateY(0); }
+
+  /* Pro hero-image placeholder (no embedded pro sprites) */
+  .pro-art-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+    background: var(--input-bg);
+  }
 
   /* Card sprites */
   .card-sprite {
@@ -1483,6 +1497,7 @@
       <button class="filter-btn" data-filter="friend" onclick="setCardFilter('friend', this)">Friends</button>
       <button class="filter-btn" data-filter="power" onclick="setCardFilter('power', this)">Powers</button>
       <button class="filter-btn" data-filter="super" onclick="setCardFilter('super', this)">Supers</button>
+      <button class="filter-btn" data-filter="pro" id="cardFilterProBtn" onclick="setCardFilter('pro', this)" style="display:none;">Pros</button>
     </div>
     <div class="modal-filter" id="cardCostFilter"><span class="filter-label">Cost</span></div>
     <div class="modal-filter" id="cardClassFilter"><span class="filter-label">Class</span></div>
@@ -1800,6 +1815,28 @@ function spriteImg(canonicalName, cssClass) {
 
 function getProName(proId) {
   return PROFESSIONALS[proId] ? PROFESSIONALS[proId].displayName : `Unknown(${proId})`;
+}
+
+// AssetKeyArt can be a card sprite or a pro hero image:
+//   CardSprites[<CardName>]  or  Professionals[heroImage<ProName>]
+// Pro art entries are marked with proArt:true to tell them apart from cards.
+function proArtEntry(pro) {
+  return { proArt: true, id: pro.id, name: pro.name, displayName: pro.displayName };
+}
+
+function artKeyFor(entry) {
+  return entry.proArt ? `Professionals[heroImage${entry.name}]` : `CardSprites[${entry.name}]`;
+}
+
+function parseArtKey(art) {
+  let m = art.match(/^CardSprites\[(.+)\]$/);
+  if (m) return findCardByName(m[1]) || null;
+  m = art.match(/^Professionals\[heroImage(.+)\]$/);
+  if (m) {
+    const pro = Object.values(PROFESSIONALS).find(p => p.name === m[1]);
+    return pro ? proArtEntry(pro) : null;
+  }
+  return null;
 }
 
 function getBackgroundForPro(proId) {
@@ -2228,6 +2265,8 @@ function openCardPicker(side) {
   cardPickerTarget = side;
   document.getElementById('cardPickerTitle').textContent =
     side === 'art' ? 'Select Card Art' : 'Pick a Card';
+  // Pro hero images are only valid as art, not as deck cards
+  document.getElementById('cardFilterProBtn').style.display = side === 'art' ? '' : 'none';
   cardFilterType = 'all';
   cardCostFilter.clear();
   cardClassFilter.clear();
@@ -2308,6 +2347,29 @@ function renderCardPicker() {
   if (cardCostFilter.size > 0) cards = cards.filter(c => CARD_DATA[c.id] && cardCostFilter.has(CARD_DATA[c.id].cost));
   if (cardClassFilter.size > 0) cards = cards.filter(c => CARD_DATA[c.id] && cardClassFilter.has(CARD_DATA[c.id].cls));
 
+  // Pro hero images (art mode only) — listed ahead of the cards
+  if (cardPickerTarget === 'art' && (cardFilterType === 'all' || cardFilterType === 'pro')
+      && cardCostFilter.size === 0 && cardClassFilter.size === 0) {
+    for (const pro of Object.values(PROFESSIONALS)) {
+      if (search && !pro.displayName.toLowerCase().includes(search) && !pro.name.toLowerCase().includes(search)) continue;
+      const el = document.createElement('div');
+      el.className = 'modal-item';
+      el.innerHTML = `
+        <span class="pro-art-icon">👤</span>
+        <span class="type-dot pro"></span>
+        <span class="id-label">Pro</span>
+        <span>${pro.displayName}</span>
+      `;
+      el.onclick = () => {
+        state.artCard = proArtEntry(pro);
+        renderArtCard();
+        updateSQL();
+        closeCardPicker();
+      };
+      list.appendChild(el);
+    }
+  }
+
   for (const card of cards) {
     const el = document.createElement('div');
     el.className = 'modal-item';
@@ -2341,9 +2403,9 @@ function renderArtCard() {
   const c = state.artCard;
   if (c) {
     el.innerHTML = `
-      ${spriteImg(c.name, 'card-sprite')}
+      ${c.proArt ? '<span class="pro-art-icon">👤</span>' : spriteImg(c.name, 'card-sprite')}
       <span class="card-name">${c.displayName}</span>
-      <span class="art-key">CardSprites[${c.name}]</span>
+      <span class="art-key">${artKeyFor(c)}</span>
     `;
   } else {
     el.innerHTML = `<span class="art-auto">Auto — random Player 1 card (fallback Spike)</span>`;
@@ -2626,9 +2688,8 @@ function applyChallengeImport(d) {
     }
   }
 
-  // Card art
-  const artMatch = d.art.match(/^CardSprites\[(.+)\]$/);
-  state.artCard = artMatch ? (findCardByName(artMatch[1]) || null) : null;
+  // Card art (card sprite or pro hero image)
+  state.artCard = parseArtKey(d.art);
 
   // Sidebar fields
   document.getElementById('challengeTitle').value = d.title;
@@ -2830,7 +2891,7 @@ function generateSQL() {
   // Asset key art: explicit selection, else random player card, else default
   let assetKeyArt = "CardSprites[Spike]";
   if (state.artCard) {
-    assetKeyArt = `CardSprites[${state.artCard.name}]`;
+    assetKeyArt = artKeyFor(state.artCard);
   } else if (state.p0.cards.length > 0) {
     const randCard = randomChoice(state.p0.cards);
     assetKeyArt = `CardSprites[${randCard.name}]`;
@@ -5010,9 +5071,9 @@ function renderPuzzleArtCard() {
   const c = puzzleState.artCard;
   if (c) {
     el.innerHTML = `
-      ${spriteImg(c.name, 'card-sprite')}
+      ${c.proArt ? '<span class="pro-art-icon">👤</span>' : spriteImg(c.name, 'card-sprite')}
       <span class="card-name">${c.displayName}</span>
-      <span class="art-key">CardSprites[${c.name}]</span>
+      <span class="art-key">${artKeyFor(c)}</span>
     `;
   } else {
     el.innerHTML = `<span class="art-auto">Auto — first Player hand card (fallback Spike)</span>`;
@@ -5076,6 +5137,28 @@ function renderBoardCardPicker() {
     c.name.toLowerCase().includes(search) ||
     String(c.id).includes(search)
   );
+
+  // Pro hero images (art mode only) — listed ahead of the cards
+  if (boardPickerTarget.type === 'art' && boardCardFilterType === 'all') {
+    for (const pro of Object.values(PROFESSIONALS)) {
+      if (search && !pro.displayName.toLowerCase().includes(search) && !pro.name.toLowerCase().includes(search)) continue;
+      const el = document.createElement('div');
+      el.className = 'modal-item';
+      el.innerHTML = `
+        <span class="pro-art-icon">👤</span>
+        <span class="type-dot pro"></span>
+        <span class="id-label">Pro</span>
+        <span>${pro.displayName}</span>
+      `;
+      el.onclick = () => {
+        puzzleState.artCard = proArtEntry(pro);
+        renderPuzzleArtCard();
+        updatePuzzleSQL();
+        closeBoardPicker();
+      };
+      list.appendChild(el);
+    }
+  }
 
   for (const card of cards) {
     const cardData = CARD_DATA[card.id];
@@ -5520,8 +5603,7 @@ function importPuzzleSQL() {
       puzzleState.solutionMath = solution.math;
       puzzleState.difficulty = solution.difficulty;
     }
-    const artMatch = art.match(/^CardSprites\[(.+)\]$/);
-    puzzleState.artCard = artMatch ? (findCardByName(artMatch[1]) || null) : null;
+    puzzleState.artCard = parseArtKey(art);
     if (ttl) document.getElementById('puzzleTtlInput').value = ttl.replace(' ', 'T').slice(0, 16);
 
     renderPuzzleBoard();
@@ -5753,7 +5835,7 @@ function generatePuzzleSQL() {
   // Asset key art: explicit selection, else first player hand card, else default
   let assetKeyArt = "CardSprites[Spike]";
   if (puzzleState.artCard) {
-    assetKeyArt = `CardSprites[${puzzleState.artCard.name}]`;
+    assetKeyArt = artKeyFor(puzzleState.artCard);
   } else if (puzzleState.playerHand.length > 0) {
     const card = ALL_CARDS[puzzleState.playerHand[0]];
     if (card) assetKeyArt = `CardSprites[${card.name}]`;

@@ -345,6 +345,22 @@
     font-size: 12px;
   }
   .overwrite-row input:focus { outline: none; border-color: var(--accent); }
+  .db-import-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    min-height: 20px;
+  }
+  .db-import-preview .found { color: var(--accent2); }
+  .db-import-preview .missing { color: var(--text-dim); opacity: 0.7; }
+  .db-import-preview .bad { color: #e17055; }
   .sql-output {
     flex: 1;
     background: var(--input-bg);
@@ -1012,6 +1028,7 @@
     </div>
     <div class="btn-row">
       <button class="btn btn-block" onclick="openImportChallenge()" title="Import a challenge from this tool's SQL output">📥 Import SQL</button>
+      <button class="btn btn-block" onclick="openImportChallengeDB()" title="Import a challenge from database CSV rows (decks, scenario, daily challenge)">🗄️ Import from DB</button>
     </div>
   </div>
 
@@ -1411,6 +1428,25 @@
       <div class="ai-status" id="importChallengeStatus"></div>
       <div class="btn-row">
         <button class="btn btn-primary" onclick="importChallengeSQL()">Import</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Import Challenge from Database Modal -->
+<div class="modal-overlay" id="importChallengeDBOverlay" onclick="closeImportChallengeDB(event)">
+  <div class="modal ai-modal" style="width:640px;">
+    <div class="modal-header">
+      <h3>🗄️ Import from Database</h3>
+      <button class="modal-close" onclick="closeImportChallengeDB()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px;">Paste the database rows — player deck, bot deck, scenario, and daily challenge (one per line, in that order; each row type is auto-detected):</label>
+      <textarea id="importChallengeDBInput" oninput="previewImportChallengeDB()" placeholder="8910,tool test,Sydney,&quot;[27, 28, ...]&quot;,&quot;[68, 322, 321]&quot;,140,9&#10;8911,tool test 2,Sydney,&quot;[27, 28, ...]&quot;,&quot;[68, 322, 321]&quot;,140,9&#10;8995,1,tool test,test,,2,0,0,4,7,8902,0,8896,0,&quot;{...settings...}&quot;,null&#10;1971,2026-07-22 23:30:48,1,tool test,&quot;&lt;align=...&gt;&quot;,Professionals[...],8995,...,..." style="min-height:160px;"></textarea>
+      <div class="db-import-preview" id="importChallengeDBPreview"></div>
+      <div class="ai-status" id="importChallengeDBStatus"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="importChallengeDB()">Import</button>
       </div>
     </div>
   </div>
@@ -2533,104 +2569,240 @@ function importChallengeSQL() {
       art = stripSqlQuotes(df[4]);
     }
 
-    // --- Resolve values ---
-    const p0ProId = scenP0Pro || parseInt(p0f[5]) || 2;
-    const p1ProId = scenP1Pro || parseInt(p1f[5]) || 7;
-    const p0CardIds = JSON.parse(stripSqlQuotes(p0f[2]));
-    const p1CardIds = JSON.parse(stripSqlQuotes(p1f[2]));
-    const p0Sps = JSON.parse(stripSqlQuotes(p0f[3]));
-    const p1Sps = JSON.parse(stripSqlQuotes(p1f[3]));
-
-    // --- Apply to state ---
-    // Pros (set select values if the option exists)
-    state.p0.proId = p0ProId;
-    state.p1.proId = p1ProId;
-    if (PROFESSIONALS[p0ProId]) document.getElementById('p0ProSelect').value = p0ProId;
-    if (PROFESSIONALS[p1ProId]) document.getElementById('p1ProSelect').value = p1ProId;
-
-    // Decks
-    state.p0.cards = p0CardIds.map(id => ALL_CARDS[id]).filter(Boolean);
-    state.p1.cards = p1CardIds.map(id => ALL_CARDS[id]).filter(Boolean);
-    state.p0.superpowers = p0Sps;
-    state.p1.superpowers = p1Sps;
-
-    // Player settings (currency + superpower overrides)
-    const psArr = settings.PlayerSettings || [];
-    applyImportedPlayerSettings('p0', psArr[0]);
-    applyImportedPlayerSettings('p1', psArr[1]);
-    const startCurrency = (psArr[0] && psArr[0].StartingCurrency !== undefined) ? psArr[0].StartingCurrency : 1;
-
-    // Board
-    state.board = Array.from({ length: 4 }, () => Array(4).fill(null));
-    const levelToRow = { P: 0, M: 1, L: 2, B: 3 };
-    for (const c of boardCards) {
-      const row = levelToRow[c.Level];
-      const col = c.Column;
-      if (row !== undefined && col >= 0 && col < 4) {
-        const cell = { cardId: c.Card, player: c.Player };
-        if (c.Status) {
-          if (c.Status.CurrentHealth !== undefined) cell.hp = c.Status.CurrentHealth;
-          if (c.Status.IsGlitched) cell.glitched = true;
-        }
-        state.board[row][col] = cell;
-      }
-    }
-
-    // Card art
-    const artMatch = art.match(/^CardSprites\[(.+)\]$/);
-    state.artCard = artMatch ? (findCardByName(artMatch[1]) || null) : null;
-
-    // Sidebar fields
-    document.getElementById('challengeTitle').value = title;
-    document.getElementById('challengeBody').value = body;
-    document.getElementById('mapId').value = mapId;
-    document.getElementById('novasToWin').value = settings.NovasToWin || 20;
-    document.getElementById('startingCurrency').value = startCurrency;
-    document.getElementById('mirrorMatch').checked = mirror;
-    const skipDraft = !!settings.SkipDrafting;
-    document.getElementById('skipDrafting').checked = skipDraft;
-    if (skipDraft && settings.StartingCards !== undefined) {
-      document.getElementById('startingCards').value = settings.StartingCards;
-    }
-    document.getElementById('startingCardsGroup').style.display = skipDraft ? '' : 'none';
-    if (settings.FirstPlayerId === 0) document.getElementById('firstPlayer').value = 'player';
-    else if (settings.FirstPlayerId === 1) document.getElementById('firstPlayer').value = 'bot';
-    else document.getElementById('firstPlayer').value = 'random';
-    if (ttl) document.getElementById('ttlInput').value = ttl.replace(' ', 'T').slice(0, 16);
-
-    // Rebuild superpower dropdowns for the imported pros, then reflect selections
-    updateSpSelect('p0');
-    updateSpSelect('p1');
-    selectLoadoutInDropdown('p0');
-    selectLoadoutInDropdown('p1');
-
-    // Render everything
-    renderDeck('p0');
-    renderDeck('p1');
-    renderSp('p0');
-    renderSp('p1');
-    renderSuperOrder('p0');
-    renderSuperOrder('p1');
-    // Expand the starting-board section if the import placed any cards
-    if (boardCards.length > 0) {
-      const boardContent = document.getElementById('challengeBoardContent');
-      if (boardContent.style.display === 'none') {
-        boardContent.style.display = '';
-        document.getElementById('challengeBoardChevron').style.transform = 'rotate(90deg)';
-      }
-    }
-    // Overwrite-ID fields default to the imported IDs (blank when the import had none)
-    document.getElementById('owP0DeckId').value = p0d.id != null ? p0d.id : '';
-    document.getElementById('owP1DeckId').value = p1d.id != null ? p1d.id : '';
-    document.getElementById('owScenarioId').value = scen.id != null ? scen.id : '';
-    document.getElementById('owDailyId').value = (dc && dc.id != null) ? dc.id : '';
-
-    renderChallengeBoard();
-    renderArtCard();
-    updateSQL();
+    // --- Resolve & apply ---
+    applyChallengeImport({
+      p0ProId: scenP0Pro || parseInt(p0f[5]) || 2,
+      p1ProId: scenP1Pro || parseInt(p1f[5]) || 7,
+      p0CardIds: JSON.parse(stripSqlQuotes(p0f[2])),
+      p1CardIds: JSON.parse(stripSqlQuotes(p1f[2])),
+      p0Sps: JSON.parse(stripSqlQuotes(p0f[3])),
+      p1Sps: JSON.parse(stripSqlQuotes(p1f[3])),
+      settings, boardCards, mapId, mirror,
+      ttl, title, body, art,
+      ids: { p0Deck: p0d.id, p1Deck: p1d.id, scenario: scen.id, daily: dc ? dc.id : null },
+    });
 
     closeImportChallenge();
     showToast('Challenge imported');
+  } catch (err) {
+    status.textContent = 'Import failed: ' + err.message;
+  }
+}
+
+// Shared by the SQL and database-row importers: apply a parsed challenge
+// to the challenge-tab state and UI, then re-render everything.
+function applyChallengeImport(d) {
+  // Pros (set select values if the option exists)
+  state.p0.proId = d.p0ProId;
+  state.p1.proId = d.p1ProId;
+  if (PROFESSIONALS[d.p0ProId]) document.getElementById('p0ProSelect').value = d.p0ProId;
+  if (PROFESSIONALS[d.p1ProId]) document.getElementById('p1ProSelect').value = d.p1ProId;
+
+  // Decks
+  state.p0.cards = d.p0CardIds.map(id => ALL_CARDS[id]).filter(Boolean);
+  state.p1.cards = d.p1CardIds.map(id => ALL_CARDS[id]).filter(Boolean);
+  state.p0.superpowers = d.p0Sps;
+  state.p1.superpowers = d.p1Sps;
+
+  // Player settings (currency + superpower overrides)
+  const psArr = d.settings.PlayerSettings || [];
+  applyImportedPlayerSettings('p0', psArr[0]);
+  applyImportedPlayerSettings('p1', psArr[1]);
+  const startCurrency = (psArr[0] && psArr[0].StartingCurrency !== undefined) ? psArr[0].StartingCurrency : 1;
+
+  // Board
+  state.board = Array.from({ length: 4 }, () => Array(4).fill(null));
+  const levelToRow = { P: 0, M: 1, L: 2, B: 3 };
+  for (const c of d.boardCards) {
+    const row = levelToRow[c.Level];
+    const col = c.Column;
+    if (row !== undefined && col >= 0 && col < 4) {
+      const cell = { cardId: c.Card, player: c.Player };
+      if (c.Status) {
+        if (c.Status.CurrentHealth !== undefined) cell.hp = c.Status.CurrentHealth;
+        if (c.Status.IsGlitched) cell.glitched = true;
+      }
+      state.board[row][col] = cell;
+    }
+  }
+
+  // Card art
+  const artMatch = d.art.match(/^CardSprites\[(.+)\]$/);
+  state.artCard = artMatch ? (findCardByName(artMatch[1]) || null) : null;
+
+  // Sidebar fields
+  document.getElementById('challengeTitle').value = d.title;
+  document.getElementById('challengeBody').value = d.body;
+  document.getElementById('mapId').value = d.mapId;
+  document.getElementById('novasToWin').value = d.settings.NovasToWin || 20;
+  document.getElementById('startingCurrency').value = startCurrency;
+  document.getElementById('mirrorMatch').checked = d.mirror;
+  const skipDraft = !!d.settings.SkipDrafting;
+  document.getElementById('skipDrafting').checked = skipDraft;
+  if (skipDraft && d.settings.StartingCards !== undefined) {
+    document.getElementById('startingCards').value = d.settings.StartingCards;
+  }
+  document.getElementById('startingCardsGroup').style.display = skipDraft ? '' : 'none';
+  if (d.settings.FirstPlayerId === 0) document.getElementById('firstPlayer').value = 'player';
+  else if (d.settings.FirstPlayerId === 1) document.getElementById('firstPlayer').value = 'bot';
+  else document.getElementById('firstPlayer').value = 'random';
+  if (d.ttl) document.getElementById('ttlInput').value = d.ttl.replace(' ', 'T').slice(0, 16);
+
+  // Rebuild superpower dropdowns for the imported pros, then reflect selections
+  updateSpSelect('p0');
+  updateSpSelect('p1');
+  selectLoadoutInDropdown('p0');
+  selectLoadoutInDropdown('p1');
+
+  // Render everything
+  renderDeck('p0');
+  renderDeck('p1');
+  renderSp('p0');
+  renderSp('p1');
+  renderSuperOrder('p0');
+  renderSuperOrder('p1');
+  // Expand the starting-board section if the import placed any cards
+  if (d.boardCards.length > 0) {
+    const boardContent = document.getElementById('challengeBoardContent');
+    if (boardContent.style.display === 'none') {
+      boardContent.style.display = '';
+      document.getElementById('challengeBoardChevron').style.transform = 'rotate(90deg)';
+    }
+  }
+  // Overwrite-ID fields default to the imported IDs (blank when the import had none)
+  document.getElementById('owP0DeckId').value = d.ids.p0Deck != null ? d.ids.p0Deck : '';
+  document.getElementById('owP1DeckId').value = d.ids.p1Deck != null ? d.ids.p1Deck : '';
+  document.getElementById('owScenarioId').value = d.ids.scenario != null ? d.ids.scenario : '';
+  document.getElementById('owDailyId').value = d.ids.daily != null ? d.ids.daily : '';
+
+  renderChallengeBoard();
+  renderArtCard();
+  updateSQL();
+}
+
+// ============================================================
+// IMPORT CHALLENGE FROM DATABASE ROWS (CSV)
+// ============================================================
+// Each pasted line is classified by its column count:
+//   Deck:           7  (ID, Name, Description, Cards, Superpowers, DeckCategoryID, ProfessionalID)
+//   DailyChallenge: 9  (ID, TimeToLive, Active, Title, Body, AssetKeyArt, ScenarioID, Created, Updated)
+//   Scenario:       16 (ID, Active, Name, Description, Hint, MapId, MirrorMatch, TeamBuilderDeckID,
+//                       P0ProfessionalID, P1ProfessionalID, P0DeckID, P0DeckCategoryID,
+//                       P1DeckID, P1DeckCategoryID, Settings, StartingCards)
+// Of the two deck rows, the first is the player deck and the second the bot deck,
+// unless the scenario's P0DeckID/P1DeckID identify them explicitly.
+
+function openImportChallengeDB() {
+  document.getElementById('importChallengeDBOverlay').classList.add('active');
+  document.getElementById('importChallengeDBInput').value = '';
+  document.getElementById('importChallengeDBStatus').textContent = '';
+  previewImportChallengeDB();
+  document.getElementById('importChallengeDBInput').focus();
+}
+
+function closeImportChallengeDB(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('importChallengeDBOverlay').classList.remove('active');
+}
+
+function parseChallengeDBRows(raw) {
+  const out = { decks: [], scenario: null, daily: null, unknown: [] };
+  for (const line of raw.split('\n')) {
+    const l = line.trim();
+    if (!l) continue;
+    const f = parseScenarioCSV(l);
+    if (f.length === 7) out.decks.push(f);
+    else if (f.length === 16) out.scenario = f;
+    else if (f.length === 9) out.daily = f;
+    else out.unknown.push(f.length);
+  }
+  return out;
+}
+
+// Resolve which deck row is player vs bot: match the scenario's P0DeckID/P1DeckID
+// when possible, otherwise paste order (player first, bot second).
+function resolveDbDeckRoles(p) {
+  let p0f = p.decks[0] || null, p1f = p.decks[1] || null;
+  if (p.scenario) {
+    const byId = (id) => p.decks.find(d => d[0].trim() === id) || null;
+    const dP0 = byId(p.scenario[10].trim());
+    const dP1 = byId(p.scenario[12].trim());
+    if (dP0 && dP1 && dP0 !== dP1) { p0f = dP0; p1f = dP1; }
+  }
+  return [p0f, p1f];
+}
+
+function previewImportChallengeDB() {
+  const el = document.getElementById('importChallengeDBPreview');
+  const raw = document.getElementById('importChallengeDBInput').value;
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (!raw.trim()) {
+    el.innerHTML = '<span class="missing">Waiting for rows&hellip;</span>';
+    return;
+  }
+  const p = parseChallengeDBRows(raw);
+  const [p0f, p1f] = resolveDbDeckRoles(p);
+  const found = (label, id, name) =>
+    `<span class="found">&#10003; ${label} &mdash; ID ${esc(id)} &middot; &ldquo;${esc(name)}&rdquo;</span>`;
+  const missing = (label, note) => `<span class="missing">&mdash; ${label}: not found${note || ''}</span>`;
+  const lines = [];
+  lines.push(p0f ? found('Player Deck', p0f[0].trim(), p0f[1]) : missing('Player Deck'));
+  lines.push(p1f ? found('Bot Deck', p1f[0].trim(), p1f[1]) : missing('Bot Deck'));
+  lines.push(p.scenario ? found('Scenario', p.scenario[0].trim(), p.scenario[2]) : missing('Scenario'));
+  lines.push(p.daily ? found('Daily Challenge', p.daily[0].trim(), p.daily[3]) : missing('Daily Challenge', ' (optional)'));
+  if (p.decks.length > 2) lines.push(`<span class="bad">&#9888; ${p.decks.length} deck rows found; only two are used</span>`);
+  if (p.unknown.length > 0) lines.push(`<span class="bad">&#9888; ${p.unknown.length} row(s) not recognized (${p.unknown.join(', ')} columns)</span>`);
+  el.innerHTML = lines.join('');
+}
+
+function importChallengeDB() {
+  const raw = document.getElementById('importChallengeDBInput').value.trim();
+  const status = document.getElementById('importChallengeDBStatus');
+  if (!raw) { status.textContent = 'Please paste the database rows.'; return; }
+
+  try {
+    const p = parseChallengeDBRows(raw);
+    if (p.decks.length < 2) throw new Error('Expected 2 deck rows (7 columns each): player first, then bot.');
+    if (!p.scenario) throw new Error('Could not find a scenario row (16 columns).');
+    const [p0f, p1f] = resolveDbDeckRoles(p);
+    const sf = p.scenario;
+
+    const settings = JSON.parse(sf[14] || '{}');
+    let boardCards = [];
+    const scRaw = (sf[15] || '').trim();
+    if (scRaw && scRaw.toLowerCase() !== 'null') boardCards = JSON.parse(scRaw) || [];
+
+    let ttl = '', title = sf[2], body = '', art = '', dailyId = null;
+    if (p.daily) {
+      const df = p.daily;
+      dailyId = parseInt(df[0]) || null;
+      ttl = df[1].trim();
+      title = df[3];
+      body = df[4];
+      art = df[5].trim();
+    }
+
+    applyChallengeImport({
+      p0ProId: parseInt(sf[8]) || parseInt(p0f[6]) || 2,
+      p1ProId: parseInt(sf[9]) || parseInt(p1f[6]) || 7,
+      p0CardIds: JSON.parse(p0f[3]),
+      p1CardIds: JSON.parse(p1f[3]),
+      p0Sps: JSON.parse(p0f[4] || '[]'),
+      p1Sps: JSON.parse(p1f[4] || '[]'),
+      settings, boardCards,
+      mapId: parseInt(sf[5]) || 2,
+      mirror: sf[6].trim() === '1',
+      ttl, title, body, art,
+      ids: {
+        p0Deck: parseInt(p0f[0]) || null,
+        p1Deck: parseInt(p1f[0]) || null,
+        scenario: parseInt(sf[0]) || null,
+        daily: dailyId,
+      },
+    });
+
+    closeImportChallengeDB();
+    showToast('Challenge imported from DB rows');
   } catch (err) {
     status.textContent = 'Import failed: ' + err.message;
   }

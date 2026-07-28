@@ -3134,6 +3134,41 @@ function closeAIModal(e) {
   document.getElementById('aiModalOverlay').classList.remove('active');
 }
 
+// Robustly pull a deck JSON object out of a model response that may include
+// prose, ```json fences, or reasoning before/after the object. Returns the last
+// balanced {...} block that parses and contains player_deck/bot_deck.
+function extractDeckJSON(text) {
+  const candidates = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+    } else if (ch === '"') inStr = true;
+    else if (ch === '{') { if (depth === 0) start = i; depth++; }
+    else if (ch === '}') { depth--; if (depth === 0 && start >= 0) { candidates.push(text.slice(start, i + 1)); start = -1; } }
+  }
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    try { const o = JSON.parse(candidates[i]); if (o && (o.player_deck || o.bot_deck)) return o; } catch (e) { /* try next */ }
+  }
+  return JSON.parse(text); // fall back (throws a clear parse error if unusable)
+}
+
+// Pull the text out of a Messages API response, with a clear error if the model
+// returned no text or the response was truncated at the token limit.
+function extractResponseText(data) {
+  const block = (data.content || []).find(b => b.type === 'text');
+  const text = (block && block.text ? block.text : '').trim();
+  if (!text) {
+    throw new Error(data.stop_reason === 'max_tokens'
+      ? 'Response hit the token limit before any text. Try a simpler prompt or retry.'
+      : 'Model returned no text. Try again.');
+  }
+  return text;
+}
+
 async function generateAITheme() {
   const apiKey = localStorage.getItem('anthropic_api_key') || '';
   const theme = document.getElementById('aiThemeInput').value.trim();
@@ -3452,7 +3487,7 @@ Respond with ONLY a JSON object:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1000,
+        max_tokens: 4000,
         messages: [{ role: 'user', content: prompt }],
       }),
     });
@@ -3463,16 +3498,8 @@ Respond with ONLY a JSON object:
     }
 
     const data = await resp.json();
-    let text = data.content[0].text.trim();
-
-    // Handle markdown wrapping
-    if (text.includes('```')) {
-      const jsonStart = text.indexOf('{');
-      const jsonEnd = text.lastIndexOf('}') + 1;
-      text = text.slice(jsonStart, jsonEnd);
-    }
-
-    const result = JSON.parse(text);
+    const text = extractResponseText(data);
+    const result = extractDeckJSON(text);
 
     // In slot-based modes, overwrite card IDs with JS-resolved ones
     if (useSlotMode && resolvedFriendIds && resolvedPowerIds) {
@@ -7013,7 +7040,7 @@ Respond with ONLY a JSON object:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 600,
+        max_tokens: 2000,
         messages: [{ role: 'user', content: prompt }],
       }),
     });
@@ -7024,12 +7051,8 @@ Respond with ONLY a JSON object:
     }
 
     const data = await resp.json();
-    let text = data.content[0].text.trim();
-    if (text.includes('```')) {
-      text = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
-    }
-
-    const result = JSON.parse(text);
+    const text = extractResponseText(data);
+    const result = extractDeckJSON(text);
     // Inject JS-resolved cards
     result.player_deck.friend_card_ids = p0Friends;
     result.player_deck.power_card_ids  = p0Powers;

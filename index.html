@@ -1897,6 +1897,14 @@ function randomSample(arr, n) {
   return result;
 }
 
+// Read a deck-count input. Returns 0 when the field is 0 — do NOT use
+// `parseInt(...) || fallback` here, since that turns a deliberate 0 into the
+// fallback. The fallback applies only to blank/invalid/negative input.
+function readCount(elId, fallback) {
+  const n = parseInt(document.getElementById(elId).value, 10);
+  return (isNaN(n) || n < 0) ? fallback : n;
+}
+
 function escapeSQL(str) {
   return str.replace(/'/g, "\\'");
 }
@@ -1984,8 +1992,8 @@ function populateProSelect(selectId) {
 // ============================================================
 
 function randomizeDeck(side) {
-  const numFriends = parseInt(document.getElementById('numFriends').value) || 4;
-  const numPowers = parseInt(document.getElementById('numPowers').value) || 2;
+  const numFriends = readCount('numFriends', 4);
+  const numPowers = readCount('numPowers', 2);
   const proId = parseInt(document.getElementById(side + 'ProSelect').value);
 
   const otherSide = side === 'p0' ? 'p1' : 'p0';
@@ -2029,8 +2037,8 @@ function randomizeAll() {
   updateSpSelect('p1');
 
   // Randomize player deck first
-  const numFriends = parseInt(document.getElementById('numFriends').value) || 4;
-  const numPowers = parseInt(document.getElementById('numPowers').value) || 2;
+  const numFriends = readCount('numFriends', 4);
+  const numPowers = readCount('numPowers', 2);
 
   const p0Friends = randomSample(FRIEND_CARDS, numFriends);
   const p0Powers = randomSample(POWER_CARDS, numPowers);
@@ -2878,7 +2886,7 @@ function generateSQL() {
   const body = document.getElementById('challengeBody').value || autoBody();
   const mapId = parseInt(document.getElementById('mapId').value) || 2;
   const novas = parseInt(document.getElementById('novasToWin').value) || 20;
-  const startCurrency = parseInt(document.getElementById('startingCurrency').value) || 1;
+  const startCurrency = readCount('startingCurrency', 1);
   const skipDraft = document.getElementById('skipDrafting').checked;
   const startingCards = skipDraft ? (parseInt(document.getElementById('startingCards').value) || 4) : null;
   const mirror = document.getElementById('mirrorMatch').checked;
@@ -3073,7 +3081,7 @@ function autoTitle() {
 
 function autoBody() {
   const novas = parseInt(document.getElementById('novasToWin').value) || 20;
-  const startCurrency = parseInt(document.getElementById('startingCurrency').value) || 1;
+  const startCurrency = readCount('startingCurrency', 1);
   let body = `<align="center">Win a match to ${novas}<style=Novas></style>!`;
   if (startCurrency !== 1) body += `\nStart with ${startCurrency}<style=Coin></style>`;
   if (state.p0.noSuper) body += `\n*No Superpowers*`;
@@ -3199,8 +3207,8 @@ async function generateAITheme() {
     return;
   }
 
-  const numFriends = parseInt(document.getElementById('numFriends').value) || 4;
-  const numPowers = parseInt(document.getElementById('numPowers').value) || 2;
+  const numFriends = readCount('numFriends', 4);
+  const numPowers = readCount('numPowers', 2);
 
   // Word→number lookup for parsing "two", "three", etc.
   const WORD_NUM = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10};
@@ -6872,8 +6880,7 @@ const SLOT_COSTS   = [1,2,3,4,5,6];
 function openSlotBuilder() {
   // Default to numFriends + numPowers slots if empty
   if (document.getElementById('slotRows').children.length === 0) {
-    const total = (parseInt(document.getElementById('numFriends').value) || 4)
-                + (parseInt(document.getElementById('numPowers').value)  || 2);
+    const total = readCount('numFriends', 4) + readCount('numPowers', 2);
     for (let i = 0; i < total; i++) addSlotRow();
   }
   document.getElementById('slotBuilderStatus').textContent = '';
@@ -6952,8 +6959,8 @@ async function generateFromSlots() {
   });
 
   const totalSlots = slots.length;
-  const numF = parseInt(document.getElementById('numFriends').value) || 4;
-  const numP = parseInt(document.getElementById('numPowers').value)  || 2;
+  const numF = readCount('numFriends', 4);
+  const numP = readCount('numPowers', 2);
 
   // Assign types: honor explicit Friend/Power first, fill Random slots to satisfy numF/numP
   const explicitFriends = slots.filter(s => s.typeReq === 'Friend').length;
@@ -7074,8 +7081,8 @@ Respond with ONLY a JSON object:
     result.bot_deck.friend_card_ids    = p1Friends;
     result.bot_deck.power_card_ids     = p1Powers;
 
-    const numFriends = parseInt(document.getElementById('numFriends').value) || 4;
-    const numPowers  = parseInt(document.getElementById('numPowers').value)  || 2;
+    const numFriends = readCount('numFriends', 4);
+    const numPowers  = readCount('numPowers', 2);
     applyAIResult(result, numFriends, numPowers, true);
 
     statusEl.textContent = 'Done!';

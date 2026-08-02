@@ -3134,6 +3134,18 @@ function closeAIModal(e) {
   document.getElementById('aiModalOverlay').classList.remove('active');
 }
 
+// True if a card's text describes a self "When Played" ability. Matches the
+// literal phrase "when played" after stripping HTML tags and collapsing
+// whitespace — so "<b>When Played:</b>" and "When Played and Start of Round"
+// match, but reactive text like "When any Energy Ally is Played" does not
+// (the words aren't adjacent there).
+function cardHasWhenPlayed(id) {
+  const d = CARD_DATA[id];
+  if (!d || !d.desc) return false;
+  const txt = d.desc.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+  return txt.includes('when played');
+}
+
 // Robustly pull a deck JSON object out of a model response that may include
 // prose, ```json fences, or reasoning before/after the object. Returns the last
 // balanced {...} block that parses and contains player_deck/bot_deck.
@@ -3373,7 +3385,8 @@ async function generateAITheme() {
       const d = CARD_DATA[c.id];
       if (d) {
         const clsName = CARD_CLASS_NAMES[d.cls] || 'Unknown';
-        cardListStr += `  ID=${c.id} "${c.displayName}" Cost=${d.cost} HP=${d.hp} Class=${clsName}\n`;
+        const wp = cardHasWhenPlayed(c.id) ? ' WhenPlayed=Yes' : '';
+        cardListStr += `  ID=${c.id} "${c.displayName}" Cost=${d.cost} HP=${d.hp} Class=${clsName}${wp}\n`;
       }
     });
     cardListStr += "\nPOWER CARDS (CardType=2):\n";
@@ -3381,7 +3394,8 @@ async function generateAITheme() {
       const d = CARD_DATA[c.id];
       if (d) {
         const clsName = CARD_CLASS_NAMES[d.cls] || 'Unknown';
-        cardListStr += `  ID=${c.id} "${c.displayName}" Cost=${d.cost} Class=${clsName}\n`;
+        const wp = cardHasWhenPlayed(c.id) ? ' WhenPlayed=Yes' : '';
+        cardListStr += `  ID=${c.id} "${c.displayName}" Cost=${d.cost} Class=${clsName}${wp}\n`;
       }
     });
     cardListStr += "\nPROFESSIONALS AND SUPERPOWERS:\n";
@@ -3437,9 +3451,10 @@ Each deck needs a different Professional and 3 superpowers from that professiona
 The decks should feel thematically opposed or complementary based on the theme.
 Try to avoid using the exact same cards in both decks.
 
-IMPORTANT: Each card has a Class (Boom, Energy, Moxie, Floral, Cyber, Distortion, Cosmic, Magic) and a Cost.
+IMPORTANT: Each card has a Class (Boom, Energy, Moxie, Floral, Cyber, Distortion, Cosmic, Magic) and a Cost. Cards whose text has a self "When Played" ability are tagged WhenPlayed=Yes; cards without that tag do NOT have a When Played ability.
 - When the user asks for a specific class (e.g. "all Energy cards"), ONLY pick cards that have that exact Class.
 - When the user asks for a cost range (e.g. "2 cost cards"), ONLY pick cards with that exact Cost value.
+- When the user asks for cards with a "when played" ability (or "when played" cards), ONLY pick cards tagged WhenPlayed=Yes. Never pick an untagged card for that requirement. If there aren't enough WhenPlayed=Yes cards of the required class/cost to fill the count, use every eligible tagged card first, then fill any remainder with the closest tagged cards available.
 - Choose cards from across the ENTIRE list — do not favor cards near the beginning or end.
 - When the user asks for "exactly one card from each class" (or similar phrasing), you MUST ensure that within each deck, no two cards share the same Class. Each class may appear AT MOST ONCE per deck. Count the classes of every card you select and verify there are no duplicates before finalizing. This applies to both Friend and Power cards combined.
 - When enforcing class uniqueness: first identify all valid cards matching any other constraints (cost, type, etc.), then select from them such that each class appears exactly once. If a class has no eligible cards under the other constraints, skip it. Never include two cards of the same class in the same deck when this rule is in effect.

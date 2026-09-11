@@ -992,6 +992,11 @@
     </div>
 
     <div class="control-group">
+      <label>Round Limit</label>
+      <input type="number" id="roundLimit" value="" min="1" placeholder="None" oninput="updateSQL()">
+    </div>
+
+    <div class="control-group">
       <label>Starting Currency</label>
       <input type="number" id="startingCurrency" value="1" min="0" max="20" oninput="updateSQL()">
     </div>
@@ -1905,6 +1910,14 @@ function readCount(elId, fallback) {
   return (isNaN(n) || n < 0) ? fallback : n;
 }
 
+// Round limit: blank/0/invalid means no limit (null).
+function getRoundLimit() {
+  const el = document.getElementById('roundLimit');
+  if (!el) return null;
+  const n = parseInt(el.value, 10);
+  return (isNaN(n) || n < 1) ? null : n;
+}
+
 function escapeSQL(str) {
   return str.replace(/'/g, "\\'");
 }
@@ -2703,7 +2716,11 @@ function applyChallengeImport(d) {
   document.getElementById('challengeTitle').value = d.title;
   document.getElementById('challengeBody').value = d.body;
   document.getElementById('mapId').value = d.mapId;
-  document.getElementById('novasToWin').value = d.settings.NovasToWin || 20;
+  const importedRoundLimit = parseInt(d.settings.RoundLimit, 10);
+  const hasRoundLimit = !isNaN(importedRoundLimit) && importedRoundLimit >= 1;
+  document.getElementById('roundLimit').value = hasRoundLimit ? importedRoundLimit : '';
+  // With a round limit the scenario stores the 999 sentinel; keep the Novas field usable.
+  document.getElementById('novasToWin').value = hasRoundLimit ? 20 : (d.settings.NovasToWin || 20);
   document.getElementById('startingCurrency').value = startCurrency;
   document.getElementById('mirrorMatch').checked = d.mirror;
   const skipDraft = !!d.settings.SkipDrafting;
@@ -2907,13 +2924,15 @@ function generateSQL() {
 
   // Settings JSON
   const firstPlayer = document.getElementById('firstPlayer').value;
-  const settings = {
-    RewardID: DEFAULT_REWARD_ID,
-    NovasToWin: novas,
-    BotPersonaId: DEFAULT_BOT_PERSONA_ID,
-    SkipDrafting: skipDraft,
-    BackgroundPath: bg,
-  };
+  const roundLimit = getRoundLimit();
+  const settings = {};
+  if (roundLimit !== null) settings.WinType = 1;
+  settings.RewardID = DEFAULT_REWARD_ID;
+  settings.NovasToWin = roundLimit !== null ? 999 : novas;
+  if (roundLimit !== null) settings.RoundLimit = roundLimit;
+  settings.BotPersonaId = DEFAULT_BOT_PERSONA_ID;
+  settings.SkipDrafting = skipDraft;
+  settings.BackgroundPath = bg;
   if (firstPlayer === 'player') {
     settings.FirstPlayerId = 0;
   } else if (firstPlayer === 'bot') {
@@ -3081,8 +3100,11 @@ function autoTitle() {
 
 function autoBody() {
   const novas = parseInt(document.getElementById('novasToWin').value) || 20;
+  const roundLimit = getRoundLimit();
   const startCurrency = readCount('startingCurrency', 1);
-  let body = `<align="center">Win a match to ${novas}<style=Novas></style>!`;
+  let body = roundLimit !== null
+    ? `<align="center">Whoever has the most <style=Novas></style> after ${roundLimit} Rounds wins!`
+    : `<align="center">Win a match to ${novas}<style=Novas></style>!`;
   if (startCurrency !== 1) body += `\nStart with ${startCurrency}<style=Coin></style>`;
   if (state.p0.noSuper) body += `\n*No Superpowers*`;
   return body;

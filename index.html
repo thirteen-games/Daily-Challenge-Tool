@@ -224,6 +224,7 @@
   .art-buttons { display: flex; gap: 6px; margin-top: 6px; }
   .card-item.friend { border-left-color: var(--friend); }
   .card-item.power { border-left-color: var(--power); }
+  .card-item.super { border-left-color: #f39c12; }
   .card-item .card-name { flex: 1; }
   .card-item .card-type {
     font-size: 10px;
@@ -1519,7 +1520,8 @@
     </div>
     <div class="modal-body">
       <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px;">Describe your challenge theme:</label>
-      <textarea id="aiThemeInput" placeholder="e.g. Fire vs Ice, Rat army swarm, Healing garden battle..."></textarea>
+      <textarea id="aiThemeInput" placeholder="e.g. Fire vs Ice &middot; Rat army swarm &middot; Put Bruiser, Telepath and Firecracker in the player deck &middot; Give the bot 5 random superpowers &middot; Two of each cost from 1 to 4"></textarea>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:6px;line-height:1.5;">Name cards to force them in (&ldquo;put X and Y in the bot deck&rdquo;), ask for &ldquo;N random superpowers / friends / powers for the player or bot deck&rdquo;, or just describe a theme &mdash; the AI sees every card&rsquo;s full ability text, superpowers included.</div>
       <div class="ai-status" id="aiStatus"></div>
       <div class="btn-row">
         <button class="btn btn-primary" id="aiGenerateBtn" onclick="generateAITheme()">Generate</button>
@@ -2087,13 +2089,14 @@ function renderDeck(side) {
   cardList.innerHTML = '';
 
   for (const card of state[side].cards) {
-    const isF = card.type === 1;
+    const typeCls = card.type === 1 ? 'friend' : card.type === 3 ? 'super' : 'power';
+    const typeLabel = card.type === 1 ? 'Friend' : card.type === 3 ? 'Super' : 'Power';
     const el = document.createElement('div');
-    el.className = `card-item ${isF ? 'friend' : 'power'}`;
+    el.className = `card-item ${typeCls}`;
     el.innerHTML = `
       ${spriteImg(card.name, 'card-sprite')}
       <span class="card-name">${card.displayName}</span>
-      <span class="card-type">${isF ? 'Friend' : 'Power'}</span>
+      <span class="card-type">${typeLabel}</span>
       <button class="remove-btn" title="Reroll" onclick="rerollCard('${side}', ${card.id})" style="font-size:13px;margin-right:2px;">🔄</button>
       <button class="remove-btn" onclick="removeCard('${side}', ${card.id})">&times;</button>
     `;
@@ -2106,8 +2109,7 @@ function renderDeck(side) {
 function rerollCard(side, cardId) {
   const card = ALL_CARDS[cardId];
   if (!card) return;
-  const isFriend = card.type === 1;
-  const pool = isFriend ? FRIEND_CARDS : POWER_CARDS;
+  const pool = card.type === 1 ? FRIEND_CARDS : card.type === 3 ? SUPERPOWER_CARDS : POWER_CARDS;
 
   // Exclude all cards currently in either deck except the one being rerolled
   const usedIds = new Set([
@@ -3211,6 +3213,225 @@ function extractResponseText(data) {
   return text;
 }
 
+// ============================================================
+// AI THEME HELPERS — card knowledge, directive parsing, structured output
+// ============================================================
+
+// Model used by the AI Theme generator on the challenge tab. One place to change.
+const AI_THEME_MODEL = 'claude-sonnet-4-6';
+
+const WORD_NUMBERS = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,
+  eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20};
+function wordToCount(s) {
+  if (!s) return null;
+  const lower = String(s).toLowerCase();
+  if (WORD_NUMBERS[lower] !== undefined) return WORD_NUMBERS[lower];
+  const n = parseInt(lower, 10);
+  return isNaN(n) ? null : n;
+}
+
+const CARD_TYPE_NAMES = { 1: 'Friend', 2: 'Power', 3: 'Superpower' };
+
+// Card metadata for ANY card, superpowers included. Prefers the generated
+// CARD_META block (Novadex snapshot via scripts/build_card_meta.py) and falls
+// back to CARD_DATA for anything it lacks.
+function cardMeta(id) {
+  const m = CARD_META[id];
+  if (m) return m;
+  const d = CARD_DATA[id];
+  if (!d) return null;
+  const card = ALL_CARDS[id];
+  return {
+    type: card ? card.type : 0, cost: d.cost, cls: d.cls, hp: d.hp,
+    tags: cardHasWhenPlayed(id) ? ['When Played'] : [],
+    desc: (d.desc || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(),
+  };
+}
+
+function buildProfessionalList() {
+  let s = 'PROFESSIONALS (each deck has one; its 3-superpower loadout comes from that pro\'s pool — this is separate from superpower cards in the deck):\n';
+  for (const [pid, pro] of Object.entries(PROFESSIONALS)) {
+    const sp = pro.superpowers.map(id => `${getCardDisplayName(id)} (ID=${id}${GOLD_SUPERPOWERS.has(id) ? ', gold' : ''})`).join(', ');
+    s += `  ${pro.displayName} (ID=${pid}): ${sp}\n`;
+  }
+  s += '  A valid loadout is exactly 1 gold + 2 non-gold superpowers from the same pro.\n';
+  return s;
+}
+
+// Full catalogue for the model: one line per card with class, cost, HP, ability
+// tags and plain-text description, grouped by type. Superpowers are included so
+// they can be placed in decks.
+function buildCardCatalogue() {
+  const line = (c) => {
+    const m = cardMeta(c.id) || {};
+    const cls = CARD_CLASS_NAMES[m.cls] || 'Unknown';
+    const hp = c.type === 1 ? ` hp=${m.hp}` : '';
+    const tags = (m.tags && m.tags.length) ? ` tags=[${m.tags.join(', ')}]` : '';
+    const desc = m.desc ? ` :: ${m.desc}` : '';
+    return `  ID=${c.id} "${c.displayName}" ${cls} cost=${m.cost}${hp}${tags}${desc}`;
+  };
+  let s = 'FRIEND CARDS (type 1 — creatures placed on the board; have HP):\n';
+  s += FRIEND_CARDS.map(line).join('\n');
+  s += '\n\nPOWER CARDS (type 2 — one-shot spells):\n';
+  s += POWER_CARDS.map(line).join('\n');
+  s += '\n\nSUPERPOWER CARDS (type 3 — strong spells; normally granted by a Professional, but they CAN also be placed directly in a deck\'s card list):\n';
+  s += SUPERPOWER_CARDS.map(line).join('\n');
+  s += '\n\n' + buildProfessionalList();
+  return s;
+}
+
+// Parse explicit, machine-checkable deck requirements out of free text so they
+// are enforced in JS no matter what the model returns:
+//   - named cards / #IDs / [id, id] lists  → forced into (or excluded from) a deck
+//   - "N random superpowers"               → N random superpower cards added
+//   - "N superpowers" (no "random")        → exactly N superpower cards, model's choice
+//   - "N friends" / "N powers"             → per-deck friend/power counts
+// Scope words ("player deck", "bot deck", "both") pick which side(s) a clause
+// applies to; an unscoped clause inherits the previous clause's scope, else both.
+function parseDeckDirectives(text) {
+  const mk = () => ({ forceIds: [], excludeIds: [], randomSupers: 0, numSupers: null, numFriends: null, numPowers: null });
+  const out = { p0: mk(), p1: mk(), summary: [], any: false };
+  if (!text) return out;
+
+  // Longest names first so "Joe Clone" wins over "Joe" and "Bloom Cat" over "Bloomer".
+  const nameIndex = [];
+  for (const c of [...FRIEND_CARDS, ...POWER_CARDS, ...SUPERPOWER_CARDS]) {
+    for (const n of new Set([c.displayName, c.name])) {
+      if (n && n.length >= 3) nameIndex.push({ n: n.toLowerCase(), id: c.id });
+    }
+  }
+  nameIndex.sort((a, b) => b.n.length - a.n.length);
+  const esc = str => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const clauses = text.split(/\n|;|\.\s|\bthen\b|\balso\b|\bmeanwhile\b/i).map(x => x.trim()).filter(Boolean);
+  let lastScope = null;
+  for (const raw of clauses) {
+    const c = raw.toLowerCase();
+    const mentionsBot = /\b(bot|opponent|enemy|ai|computer|p1)\b/.test(c);
+    const mentionsPlayer = /\b(player|human|me|my|p0)\b/.test(c);
+    const both = /\b(both|each|either|every)\b/.test(c) || (mentionsBot && mentionsPlayer);
+    const scope = both ? ['p0', 'p1'] : mentionsBot ? ['p1'] : mentionsPlayer ? ['p0'] : (lastScope || ['p0', 'p1']);
+    if (mentionsBot || mentionsPlayer || both) lastScope = scope;
+
+    const excluding = /\b(no|without|exclude|excluding|avoid|not|never|remove|ban|except)\b/.test(c)
+                   && !/\b(put|include|add|use|give|with|specifically|these cards|following)\b/.test(c);
+
+    // --- explicit card IDs: "#63", "ID 63", "[21, 22, 39]"
+    const ids = new Set();
+    for (const m of c.matchAll(/#\s*(\d+)|\bid\s*[:=]?\s*(\d+)/g)) ids.add(parseInt(m[1] || m[2], 10));
+    for (const m of c.matchAll(/\[([\d,\s]+)\]/g)) for (const n of m[1].split(',')) if (n.trim()) ids.add(parseInt(n, 10));
+    // --- card names; mask each match so shorter names can't re-match inside it
+    let masked = c;
+    for (const { n, id } of nameIndex) {
+      const re = new RegExp(`(^|[^a-z0-9])${esc(n)}(?=$|[^a-z0-9])`, 'g');
+      if (re.test(masked)) {
+        ids.add(id);
+        masked = masked.replace(re, (m0, pre) => pre + '#'.repeat(n.length));
+      }
+    }
+    const idList = [...ids].filter(id => ALL_CARDS[id]);
+    if (idList.length) {
+      for (const side of scope) (excluding ? out[side].excludeIds : out[side].forceIds).push(...idList);
+      out.summary.push(`${excluding ? 'Exclude' : 'Force'} ${idList.map(id => `${getCardDisplayName(id)} (ID=${id})`).join(', ')} → ${scope.join('+')}`);
+    }
+
+    // --- counts: "10 random superpowers", "pick 3 supers", "5 friends and 2 powers"
+    const countRe = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty)\s+(random\s+|different\s+|unique\s+)?(super\s*powers?|supers?|friends?|powers?)\b/g;
+    for (const m of c.matchAll(countRe)) {
+      const n = wordToCount(m[1]);
+      if (n === null) continue;
+      const isRandom = /^random/.test(m[2] || '');
+      const kind = m[3].replace(/\s+/g, '');
+      // "3 superpowers from the professional" is the loadout, not deck cards
+      if (/^super/.test(kind) && /\b(loadout|professional|pro's|pros)\b/.test(c)) continue;
+      let what;
+      for (const side of scope) {
+        if (/^super/.test(kind)) {
+          if (isRandom) { out[side].randomSupers += n; what = 'random superpower cards'; }
+          else { out[side].numSupers = n; what = 'superpower cards (model picks)'; }
+        } else if (/^friend/.test(kind)) { out[side].numFriends = n; what = 'friends'; }
+        else { out[side].numPowers = n; what = 'powers'; }
+      }
+      out.summary.push(`${n} ${what} → ${scope.join('+')}`);
+    }
+  }
+  for (const side of ['p0', 'p1']) {
+    out[side].forceIds = [...new Set(out[side].forceIds)];
+    out[side].excludeIds = [...new Set(out[side].excludeIds)].filter(id => !out[side].forceIds.includes(id));
+  }
+  out.any = out.summary.length > 0;
+  return out;
+}
+
+// Structured output: the model must answer by calling this tool, so the reply
+// is schema-valid JSON instead of prose we regex apart.
+const DECK_SCHEMA = {
+  type: 'object',
+  required: ['professional_id', 'friend_card_ids', 'power_card_ids', 'superpower_card_ids', 'superpower_ids', 'deck_name'],
+  properties: {
+    professional_id:    { type: 'integer', description: 'Professional ID from the catalogue.' },
+    friend_card_ids:    { type: 'array', items: { type: 'integer' }, description: 'Friend (type 1) card IDs.' },
+    power_card_ids:     { type: 'array', items: { type: 'integer' }, description: 'Power (type 2) card IDs.' },
+    superpower_card_ids:{ type: 'array', items: { type: 'integer' }, description: 'Superpower (type 3) card IDs placed IN the deck. Usually empty unless the designer asked for superpowers in the deck.' },
+    superpower_ids:     { type: 'array', items: { type: 'integer' }, minItems: 3, maxItems: 3, description: 'The pro\'s 3-superpower loadout: 1 gold + 2 non-gold from that pro\'s pool.' },
+    deck_name:          { type: 'string' },
+  },
+};
+const DECK_BUILDER_TOOL = {
+  name: 'build_decks',
+  description: 'Return the PLAYER and BOT decks plus the challenge title and body. All card IDs must come from the catalogue.',
+  input_schema: {
+    type: 'object',
+    required: ['challenge_title', 'challenge_body', 'player_deck', 'bot_deck'],
+    properties: {
+      challenge_title: { type: 'string', description: 'Short, punchy title (about 40 characters or fewer).' },
+      challenge_body:  { type: 'string', description: 'Exactly the form <align="center">one or two sentences<style=Novas></style>' },
+      player_deck: DECK_SCHEMA,
+      bot_deck: DECK_SCHEMA,
+    },
+  },
+};
+
+// Pull the deck result out of a Messages API response: the build_decks tool
+// call if present, otherwise fall back to extracting JSON from the text.
+function extractDeckResult(data) {
+  const tu = (data.content || []).find(b => b.type === 'tool_use' && b.name === DECK_BUILDER_TOOL.name);
+  if (tu && tu.input && (tu.input.player_deck || tu.input.bot_deck)) return tu.input;
+  return extractDeckJSON(extractResponseText(data));
+}
+
+function buildAISystemPrompt(useSlotMode) {
+  const intro = 'You are the deck designer for "Nova Island", a 4x4 grid card game. You build two opposing decks (PLAYER vs BOT) for a daily challenge and answer ONLY by calling the build_decks tool.';
+  if (useSlotMode) {
+    return `${intro}
+
+The card lists for both decks have ALREADY been chosen by the tool from the designer's specification. Your job:
+1. Choose a DIFFERENT Professional for each deck.
+2. Give each a valid 3-superpower loadout (exactly 1 gold + 2 non-gold from that pro's pool).
+3. Give each deck a fitting deck_name.
+4. Write a short, punchy challenge_title and a challenge_body of exactly the form <align="center">one or two sentences<style=Novas></style>.
+Leave friend_card_ids, power_card_ids and superpower_card_ids as empty arrays.`;
+  }
+  return `${intro}
+
+Game facts:
+- Card types: Friend (creature with HP that sits on the board), Power (one-shot spell), Superpower (strong spell). Classes: Boom, Energy, Moxie, Floral, Cyber, Distortion, Cosmic, Magic.
+- Each deck has one Professional and a 3-superpower loadout from that pro's pool (exactly 1 gold + 2 non-gold). The two decks must use DIFFERENT professionals.
+- Superpower CARDS can additionally be placed directly in a deck's card list (superpower_card_ids). Only do this when the designer asks for superpowers in the deck — by name, by count, or thematically ("superpower-heavy"). They are extra and do not count toward the Friend/Power totals.
+- Every catalogue line carries the card's ability text and tags. Use them: pick cards whose actual mechanics fit the theme (a "healing garden" wants Floral/Bloom/heal text, not green-sounding names).
+
+Hard rules — check each before answering:
+1. Use ONLY IDs from the catalogue, in the array matching the card's type (friend_card_ids = type 1, power_card_ids = type 2, superpower_card_ids = type 3).
+2. Deck sizes: exactly the Friend and Power counts given for each deck. No duplicate IDs within a deck. Don't give both decks the same cards unless asked.
+3. A class request ("all Energy cards") means ONLY that exact class. A cost request ("2-cost cards") means ONLY that exact cost. A "When Played" request means ONLY cards whose tags include "When Played".
+4. "One card from each class" means no class repeats within a deck (friends + powers combined).
+5. A cost distribution ("two of each cost from 1 to 4") means exactly that many cards per cost, in both decks, overriding the default sizes.
+6. Per-deck instructions ("the player deck gets X", "give the bot Y") apply to that deck only.
+7. Requirements marked as already parsed by the tool WILL be enforced after you answer. Include forced cards yourself too (so your other picks complement them) and never duplicate or contradict them. Where the tool says it will add random superpowers, leave superpower_card_ids empty unless specific superpowers were also named.
+8. Decks should feel thematically opposed or complementary; give each a fitting deck_name.
+9. challenge_title: short and punchy. challenge_body: exactly the form <align="center">one or two sentences<style=Novas></style>.`;
+}
+
 async function generateAITheme() {
   const apiKey = localStorage.getItem('anthropic_api_key') || '';
   const theme = document.getElementById('aiThemeInput').value.trim();
@@ -3232,15 +3453,10 @@ async function generateAITheme() {
   const numFriends = readCount('numFriends', 4);
   const numPowers = readCount('numPowers', 2);
 
-  // Word→number lookup for parsing "two", "three", etc.
-  const WORD_NUM = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10};
-  const parseCount = s => {
-    if (!s) return null;
-    const lower = s.toLowerCase();
-    if (WORD_NUM[lower] !== undefined) return WORD_NUM[lower];
-    const n = parseInt(s);
-    return isNaN(n) ? null : n;
-  };
+  // Explicit per-deck requirements parsed from the text (forced cards, random
+  // superpowers, per-deck counts). Enforced in JS after the model responds.
+  const directives = parseDeckDirectives(theme);
+  const parseCount = wordToCount;
 
   // Detect cost-distribution patterns like "two of each cost between 1 and 4",
   // "2 cost-3 cards", "three 4-cost cards". Returns a list of {cls,cost} slots, or null.
@@ -3400,121 +3616,39 @@ async function generateAITheme() {
     resolvedPowerIds  = { p0: p0Powers,  p1: p1Powers  };
   }
 
-  // Build card list for prompt
-  let cardListStr = "";
+  // Build the prompts. Cards resolved in JS (slot modes) are described by name;
+  // otherwise the model gets the full catalogue with ability text.
+  const systemPrompt = buildAISystemPrompt(useSlotMode);
+  let userPrompt;
   if (useSlotMode) {
-    // Only need professionals list — cards are already resolved
-    cardListStr = "PROFESSIONALS AND SUPERPOWERS:\n";
-    for (const [pid, pro] of Object.entries(PROFESSIONALS)) {
-      const spNames = pro.superpowers.map(id => `${getCardName(id)} (ID=${id})`).join(', ');
-      cardListStr += `  ${pro.displayName} (ID=${pid}): Superpowers: ${spNames}\n`;
-    }
+    const names = ids => ids.map(id => `${getCardDisplayName(id)} (ID=${id})`).join(', ') || '(none)';
+    userPrompt = `Designer's specification:
+"""${theme}"""
+
+Cards already chosen by the tool:
+- PLAYER deck: Friends: ${names(resolvedFriendIds.p0)}; Powers: ${names(resolvedPowerIds.p0)}
+- BOT deck: Friends: ${names(resolvedFriendIds.p1)}; Powers: ${names(resolvedPowerIds.p1)}
+${directives.any ? `\nAdditional requirements the tool will enforce:\n${directives.summary.map(x => '- ' + x).join('\n')}\n` : ''}
+${buildProfessionalList()}`;
   } else {
-    cardListStr = "FRIEND CARDS (CardType=1):\n";
-    FRIEND_CARDS.forEach(c => {
-      const d = CARD_DATA[c.id];
-      if (d) {
-        const clsName = CARD_CLASS_NAMES[d.cls] || 'Unknown';
-        const wp = cardHasWhenPlayed(c.id) ? ' WhenPlayed=Yes' : '';
-        cardListStr += `  ID=${c.id} "${c.displayName}" Cost=${d.cost} HP=${d.hp} Class=${clsName}${wp}\n`;
-      }
-    });
-    cardListStr += "\nPOWER CARDS (CardType=2):\n";
-    POWER_CARDS.forEach(c => {
-      const d = CARD_DATA[c.id];
-      if (d) {
-        const clsName = CARD_CLASS_NAMES[d.cls] || 'Unknown';
-        const wp = cardHasWhenPlayed(c.id) ? ' WhenPlayed=Yes' : '';
-        cardListStr += `  ID=${c.id} "${c.displayName}" Cost=${d.cost} Class=${clsName}${wp}\n`;
-      }
-    });
-    cardListStr += "\nPROFESSIONALS AND SUPERPOWERS:\n";
-    for (const [pid, pro] of Object.entries(PROFESSIONALS)) {
-      const spNames = pro.superpowers.map(id => `${getCardName(id)} (ID=${id})`).join(', ');
-      cardListStr += `  ${pro.displayName} (ID=${pid}): Superpowers: ${spNames}\n`;
-    }
-  }
+    const sizeLine = (label, side) => {
+      const d = directives[side];
+      const f = d.numFriends !== null ? d.numFriends : numFriends;
+      const p = d.numPowers !== null ? d.numPowers : numPowers;
+      let extra = '';
+      if (d.randomSupers > 0) extra += ` (+ ${d.randomSupers} random Superpower card${d.randomSupers === 1 ? '' : 's'} the tool will add — leave superpower_card_ids empty unless specific superpowers were named)`;
+      if (d.numSupers !== null) extra += ` + exactly ${d.numSupers} Superpower card${d.numSupers === 1 ? '' : 's'} of your choice in superpower_card_ids`;
+      return `- ${label} deck: ${f} Friend card${f === 1 ? '' : 's'} + ${p} Power card${p === 1 ? '' : 's'}${extra}`;
+    };
+    userPrompt = `Designer's theme / instructions:
+"""${theme}"""
 
-  let prompt;
-  if (useSlotMode) {
-    prompt = `You are helping build two opposing card decks for a daily challenge in a game called Nova Island.
-
-Theme/card requirements: "${theme}"
-
-The cards have already been selected. Your job is ONLY to:
-1. Pick a Professional for each deck (they must be different)
-2. Pick 3 superpowers for each Professional from their pool
-3. Suggest a creative challenge title
-4. Suggest a challenge body text (format: <align="center">description here<style=Novas></style>)
-
-${cardListStr}
-
-Respond with ONLY a JSON object (no friend_card_ids or power_card_ids needed — leave them as empty arrays):
-{
-    "challenge_title": "<string>",
-    "challenge_body": "<string>",
-    "player_deck": {
-        "professional_id": <int>,
-        "friend_card_ids": [],
-        "power_card_ids": [],
-        "superpower_ids": [<int>, <int>, <int>],
-        "deck_name": "<string>"
-    },
-    "bot_deck": {
-        "professional_id": <int>,
-        "friend_card_ids": [],
-        "power_card_ids": [],
-        "superpower_ids": [<int>, <int>, <int>],
-        "deck_name": "<string>"
-    }
-}`;
-  } else {
-    prompt = `You are helping build two opposing card decks for a daily challenge in a game called Nova Island.
-
-Theme: "${theme}"
-
-Build TWO decks:
-1. A PLAYER deck with ${numFriends} Friend cards and ${numPowers} Power cards
-2. A BOT deck with ${numFriends} Friend cards and ${numPowers} Power cards
-
-Each deck needs a different Professional and 3 superpowers from that professional's pool.
-The decks should feel thematically opposed or complementary based on the theme.
-Try to avoid using the exact same cards in both decks.
-
-IMPORTANT: Each card has a Class (Boom, Energy, Moxie, Floral, Cyber, Distortion, Cosmic, Magic) and a Cost. Cards whose text has a self "When Played" ability are tagged WhenPlayed=Yes; cards without that tag do NOT have a When Played ability.
-- When the user asks for a specific class (e.g. "all Energy cards"), ONLY pick cards that have that exact Class.
-- When the user asks for a cost range (e.g. "2 cost cards"), ONLY pick cards with that exact Cost value.
-- When the user asks for cards with a "when played" ability (or "when played" cards), ONLY pick cards tagged WhenPlayed=Yes. Never pick an untagged card for that requirement. If there aren't enough WhenPlayed=Yes cards of the required class/cost to fill the count, use every eligible tagged card first, then fill any remainder with the closest tagged cards available.
-- Choose cards from across the ENTIRE list — do not favor cards near the beginning or end.
-- When the user asks for "exactly one card from each class" (or similar phrasing), you MUST ensure that within each deck, no two cards share the same Class. Each class may appear AT MOST ONCE per deck. Count the classes of every card you select and verify there are no duplicates before finalizing. This applies to both Friend and Power cards combined.
-- When enforcing class uniqueness: first identify all valid cards matching any other constraints (cost, type, etc.), then select from them such that each class appears exactly once. If a class has no eligible cards under the other constraints, skip it. Never include two cards of the same class in the same deck when this rule is in effect.
-- COST DISTRIBUTION: When the user requests a specific count per cost value (e.g. "two of each cost between 1 and 4", "3 cost-2 cards and 2 cost-3 cards", "one card of each cost from 1 to 5"), you MUST produce EXACTLY that count for EACH specified cost. Before finalizing, list every card you picked alongside its cost, group them by cost, and verify the count per cost matches the request exactly. Apply the same distribution to BOTH the player deck and the bot deck. If the requested distribution implies a different total than the deck slot counts above, prioritize the requested distribution — both decks should contain exactly the requested number of cards per cost, with friends/powers split sensibly between them.
-
-${cardListStr}
-
-Also suggest:
-- A creative challenge title
-- A body text describing the challenge (use this format: <align="center">description here<style=Novas></style>)
-
-Respond with ONLY a JSON object:
-{
-    "challenge_title": "<string>",
-    "challenge_body": "<string>",
-    "player_deck": {
-        "professional_id": <int>,
-        "friend_card_ids": [<int>, ...],
-        "power_card_ids": [<int>, ...],
-        "superpower_ids": [<int>, <int>, <int>],
-        "deck_name": "<string>"
-    },
-    "bot_deck": {
-        "professional_id": <int>,
-        "friend_card_ids": [<int>, ...],
-        "power_card_ids": [<int>, ...],
-        "superpower_ids": [<int>, <int>, <int>],
-        "deck_name": "<string>"
-    }
-}`;
+Deck sizes:
+${sizeLine('PLAYER', 'p0')}
+${sizeLine('BOT', 'p1')}
+${directives.any ? `\nRequirements the tool has ALREADY parsed and WILL enforce after you answer (build the rest of each deck to complement them; don't duplicate or contradict them):\n${directives.summary.map(x => '- ' + x).join('\n')}\n` : ''}
+CARD CATALOGUE
+${buildCardCatalogue()}`;
   }
 
   statusEl.textContent = 'Generating...';
@@ -3531,9 +3665,12 @@ Respond with ONLY a JSON object:
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }],
+        model: AI_THEME_MODEL,
+        max_tokens: 6000,
+        system: systemPrompt,
+        tools: [DECK_BUILDER_TOOL],
+        tool_choice: { type: 'tool', name: DECK_BUILDER_TOOL.name },
+        messages: [{ role: 'user', content: userPrompt }],
       }),
     });
 
@@ -3543,8 +3680,7 @@ Respond with ONLY a JSON object:
     }
 
     const data = await resp.json();
-    const text = extractResponseText(data);
-    const result = extractDeckJSON(text);
+    const result = extractDeckResult(data);
 
     // In slot-based modes, overwrite card IDs with JS-resolved ones
     if (useSlotMode && resolvedFriendIds && resolvedPowerIds) {
@@ -3554,8 +3690,9 @@ Respond with ONLY a JSON object:
       result.bot_deck.power_card_ids     = resolvedPowerIds.p1;
     }
 
-    applyAIResult(result, effectiveNumFriends, effectiveNumPowers, useSlotMode);
+    applyAIResult(result, effectiveNumFriends, effectiveNumPowers, useSlotMode, directives);
 
+    if (directives.any) showToast('Enforced: ' + directives.summary.join(' · '));
     statusEl.textContent = 'Done! Decks generated.';
     statusEl.className = 'ai-status success';
     setTimeout(() => closeAIModal(), 800);
@@ -3568,61 +3705,78 @@ Respond with ONLY a JSON object:
   }
 }
 
-function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS) {
+function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS, directives = null) {
   const validFriendIds = new Set(FRIEND_CARDS.map(c => c.id));
-  const validPowerIds = new Set(POWER_CARDS.map(c => c.id));
+  const validPowerIds  = new Set(POWER_CARDS.map(c => c.id));
+  const validSuperIds  = new Set(SUPERPOWER_CARDS.map(c => c.id));
+  const uniq = arr => [...new Set(arr)];
+  const themeText = document.getElementById('aiThemeInput').value;
+  const classUniquenessRequested = /one card (from|per|of) each class|each class.{0,20}once|exactly one.{0,20}class|unique class/i.test(themeText);
 
   function parseDeck(deckData, side) {
+    deckData = deckData || {};
+    const d = directives ? directives[side] : null;
+    const forced = d ? d.forceIds : [];
+    const forcedSet = new Set(forced);
+    const exclude = new Set(d ? d.excludeIds : []);
+    const keep = valid => id => valid.has(id) && !exclude.has(id);
+
     let proId = deckData.professional_id;
     if (!PROFESSIONALS[proId]) proId = parseInt(Object.keys(PROFESSIONALS)[0]);
 
-    let friendIds, powerIds;
+    // Forced cards come first so padding/truncation can never drop them.
+    let friendIds = uniq([...forced.filter(keep(validFriendIds)), ...(deckData.friend_card_ids || []).filter(keep(validFriendIds))]);
+    let powerIds  = uniq([...forced.filter(keep(validPowerIds)),  ...(deckData.power_card_ids  || []).filter(keep(validPowerIds))]);
+    let superIds  = uniq([...forced.filter(keep(validSuperIds)),  ...(deckData.superpower_card_ids || []).filter(keep(validSuperIds))]);
 
-    friendIds = (deckData.friend_card_ids || []).filter(id => validFriendIds.has(id));
-    powerIds  = (deckData.power_card_ids  || []).filter(id => validPowerIds.has(id));
-
-    // Enforce class uniqueness if the constraint was requested
-    const themeText = document.getElementById('aiThemeInput').value.toLowerCase();
-    const classUniquenessRequested = /one card (from|per|of) each class|each class.{0,20}once|exactly one.{0,20}class|unique class/i.test(
-      document.getElementById('aiThemeInput').value
-    );
+    // Enforce class uniqueness if requested (friends + powers combined; forced cards exempt)
     if (classUniquenessRequested) {
-      // Deduplicate by class across friends + powers combined
-      const seenClasses = new Set();
-      function dedupeByClass(ids) {
-        const kept = [];
-        for (const id of ids) {
-          const d = CARD_DATA[id];
-          const cls = d ? d.cls : null;
-          if (cls !== null && cls !== 0 && seenClasses.has(cls)) continue;
-          kept.push(id);
-          if (cls !== null && cls !== 0) seenClasses.add(cls);
-        }
-        return kept;
-      }
-      friendIds = dedupeByClass(friendIds);
-      powerIds = dedupeByClass(powerIds);
+      const seen = new Set();
+      const dedupe = ids => ids.filter(id => {
+        const m = cardMeta(id);
+        const cls = m ? m.cls : null;
+        if (cls === null || cls === 0) return true;
+        if (forcedSet.has(id)) { seen.add(cls); return true; }
+        if (seen.has(cls)) return false;
+        seen.add(cls);
+        return true;
+      });
+      friendIds = dedupe(friendIds);
+      powerIds = dedupe(powerIds);
     }
 
-    // Pad if needed (skip when cards were already resolved deterministically in JS)
+    // Pad/truncate friends and powers to the target counts (skip when a slot
+    // mode already resolved the exact cards). Per-deck counts from the text win.
     if (!cardsResolvedByJS) {
-      if (friendIds.length < numFriends) {
-        const remaining = FRIEND_CARDS.filter(c => !friendIds.includes(c.id)).map(c => c.id);
-        friendIds.push(...randomSample(remaining, numFriends - friendIds.length));
-      }
-      if (powerIds.length < numPowers) {
-        const remaining = POWER_CARDS.filter(c => !powerIds.includes(c.id)).map(c => c.id);
-        powerIds.push(...randomSample(remaining, numPowers - powerIds.length));
-      }
-
-      friendIds = friendIds.slice(0, numFriends);
-      powerIds = powerIds.slice(0, numPowers);
+      const targetF = d && d.numFriends !== null ? d.numFriends : numFriends;
+      const targetP = d && d.numPowers  !== null ? d.numPowers  : numPowers;
+      const fit = (ids, pool, target) => {
+        if (ids.length < target) {
+          const remaining = pool.map(c => c.id).filter(id => !ids.includes(id) && !exclude.has(id));
+          ids.push(...randomSample(remaining, target - ids.length));
+        }
+        const forcedCount = ids.filter(id => forcedSet.has(id)).length;
+        return ids.slice(0, Math.max(target, forcedCount));
+      };
+      friendIds = fit(friendIds, FRIEND_CARDS, targetF);
+      powerIds  = fit(powerIds,  POWER_CARDS,  targetP);
     }
 
-    const allCardIds = [...friendIds, ...powerIds].sort((a, b) => a - b);
+    // Superpower cards in the deck: random top-ups and exact counts from the text
+    if (d) {
+      const pool = () => SUPERPOWER_CARDS.map(c => c.id).filter(id => !superIds.includes(id) && !exclude.has(id));
+      if (d.randomSupers > 0) superIds.push(...randomSample(pool(), d.randomSupers));
+      if (d.numSupers !== null) {
+        if (superIds.length < d.numSupers) superIds.push(...randomSample(pool(), d.numSupers - superIds.length));
+        const forcedCount = superIds.filter(id => forcedSet.has(id)).length;
+        superIds = superIds.slice(0, Math.max(d.numSupers, forcedCount));
+      }
+    }
+
+    const allCardIds = [...friendIds, ...powerIds, ...superIds].sort((a, b) => a - b);
     const cards = allCardIds.map(id => ALL_CARDS[id]).filter(Boolean);
 
-    // Validate superpowers
+    // Validate the superpower loadout (1 gold + 2 non-gold from this pro)
     let spIds = deckData.superpower_ids || [];
     const loadouts = getSuperpowerLoadouts(proId);
     const spSorted = spIds.slice().sort().join(',');
@@ -3662,6 +3816,11 @@ const CARD_ABILITIES = {"1":[{"type":"AddHealthAbility","triggers":[{"trigger":4
 
 // Make abilities accessible to simulator
 window._cardAbilities = CARD_ABILITIES;
+
+// BEGIN CARD_META (generated by scripts/build_card_meta.py -- do not edit by hand)
+// 202 cards from cardData.json; keys: type(1=Friend,2=Power,3=Superpower), cost, cls, hp, tags, desc
+const CARD_META = {"1":{"type":1,"cost":1,"cls":2,"hp":1,"tags":["When Other Card Played","Increase Health"],"desc":"When any Energy Ally is Played: Gets +1Health."},"2":{"type":1,"cost":1,"cls":2,"hp":3,"tags":["When Played"],"desc":"When Played: Opponent draws a card."},"3":{"type":1,"cost":1,"cls":3,"hp":2,"tags":[],"desc":""},"5":{"type":1,"cost":1,"cls":4,"hp":1,"tags":["Bloom","When Other Card Played"],"desc":"1 Bloom When any Floral Ally is Played: Gets +1 Bloom"},"6":{"type":1,"cost":1,"cls":4,"hp":2,"tags":["Bloom"],"desc":"2 Bloom"},"7":{"type":1,"cost":2,"cls":2,"hp":4,"tags":["Start of Round","Increase Health"],"desc":"Start of Round: If this has more than 4Health, gives +1Health to surrounding Allies then does 1 damage to itself."},"8":{"type":1,"cost":2,"cls":7,"hp":5,"tags":["When Played","Other","Zap"],"desc":"When Played and When you gain a card from an Ally: Zaps 3 of your opponent's Novas. (1/Round)"},"9":{"type":1,"cost":2,"cls":4,"hp":2,"tags":["When Played","Spawn","Bloom"],"desc":"2 Bloom When Played: Spawns a Bloom Kitten on the highest % spot."},"10":{"type":1,"cost":3,"cls":4,"hp":5,"tags":["When Played","When Energized","Increase Health","Bloom","When Other Card Played"],"desc":"When Played: Gives other Allies +2 Bloom. When any Ally is Played: Gives that Ally +1 Bloom. When Energized: Gives other Allies +1Health."},"11":{"type":1,"cost":3,"cls":2,"hp":3,"tags":["When Played","Increase Health","When Other Card Played","Start of Round"],"desc":"When Played and Start of Round: Gives other Allies +1Health. When any Ally is Played: Gives that Ally +1Health."},"12":{"type":1,"cost":4,"cls":3,"hp":6,"tags":["When Played","Start of Energizing","Spawn","When Destroyed"],"desc":"When Played: Spawns 2 Joes on the highest % spots. Start of Energizing and When Destroyed: Spawns a Joe on the highest % spot."},"13":{"type":1,"cost":4,"cls":2,"hp":3,"tags":["When Played","Increase Health","When Other Card Played"],"desc":"When Played and When Opponent plays any Power: Gives itself +2Health, then surrounding Allies +1Health."},"14":{"type":1,"cost":1,"cls":1,"hp":2,"tags":["When Energized","Damage","When Destroyed"],"desc":"When Energized and When Destroyed: Does 1 damage to all Enemies."},"15":{"type":1,"cost":2,"cls":1,"hp":4,"tags":["When Energized","Damage","When Destroyed"],"desc":"When Energized and When Destroyed: Does 1 damage to surrounding Enemies."},"16":{"type":1,"cost":2,"cls":3,"hp":3,"tags":["Start of Energizing","Damage","When Played","Increase Health"],"desc":"Start of Energizing: Does 2 damage to Enemies below it in its column. When Played in Mezz or Penthouse: Gets +1Health."},"17":{"type":1,"cost":2,"cls":3,"hp":3,"tags":["Start of Energizing","Spawn","Damage"],"desc":"When Played: Spawns a random Rat-A-Baby (no PH). Start of Energizing: Does 1 damage to Enemies in its column, then spawns a random Rat-A-Baby (no PH)."},"18":{"type":1,"cost":2,"cls":5,"hp":2,"tags":["Start of Round","Damage","When Played"],"desc":"When Played and Start of Round: Does 1 damage to Enemies in its row."},"19":{"type":1,"cost":3,"cls":5,"hp":3,"tags":["When Played","Damage","Glitch","Other","Delete"],"desc":"When Played: Glitches Enemies in its row then does 2 damage to them. When Any Cyber Ally is Played: Deletes Enemies in its row with 1Health."},"20":{"type":1,"cost":4,"cls":5,"hp":3,"tags":["When Played","Start of Round","Damage","Glitch"],"desc":"When Played and Start of Round: Glitches surrounding Enemies, then does 1 damage to them."},"21":{"type":1,"cost":4,"cls":1,"hp":4,"tags":["When Played","When Energized","Damage"],"desc":"When Played: Does 1 damage to random Enemies 3 times. When Energized: Does 1 damage to random Enemies 4 times."},"22":{"type":1,"cost":4,"cls":7,"hp":3,"tags":["When Played","Start of Round","Draw","Get Coin"],"desc":"When Played and Start of Round: Adds 1 coin to your Bank and draws a card."},"23":{"type":1,"cost":2,"cls":5,"hp":3,"tags":["When Energized","When Played","Start of Round","Add Card","When Destroyed"],"desc":"When Energized: Does 3 damage to itself. When Played, Start of Round, and When Destroyed: Adds a Transporter to your hand."},"24":{"type":1,"cost":3,"cls":1,"hp":4,"tags":["Other","When Played","Add Card","Add Health"],"desc":"When Played and When any Boom Ally does damage: Adds a Slicer to your hand (1/Round). When you play a Boom Power: Gets +1Health."},"25":{"type":1,"cost":3,"cls":6,"hp":4,"tags":["When Played","Spawn","Start of Energizing","Move","Other","Increase Health"],"desc":"When Played: Spawns 2 Obstructors on highest % spots. Start of Energizing: Repositions to highest % spot (if higher). When this Moves: Gains 2Health."},"26":{"type":1,"cost":5,"cls":7,"hp":5,"tags":["When Played","Start of Round","Add Card"],"desc":"When Played and Start of Round: Adds a random Superpower to your hand."},"27":{"type":1,"cost":2,"cls":6,"hp":3,"tags":["When Played","Suspend","Increase Health"],"desc":"When Played before Start of Energizing: Suspends the column to its left. When anything else Suspends 1 or more columns: Gains 2Health"},"28":{"type":1,"cost":2,"cls":6,"hp":4,"tags":["When Played","Override"],"desc":"When Played before Start of Energizing: Overrides its column to the Basement."},"29":{"type":1,"cost":4,"cls":6,"hp":6,"tags":["When Played","Start of Energizing","Move"],"desc":"When Played and Start of Energizing: Moves Enemies in its column to lowest % spots, then moves to highest % spot in its column."},"30":{"type":2,"cost":1,"cls":3,"hp":0,"tags":["Damage"],"desc":"Do 3 damage to any Mezz or Penthouse Enemy, then do 1 damage to other Mezz and Penthouse Enemies."},"31":{"type":2,"cost":1,"cls":1,"hp":0,"tags":["Damage"],"desc":"Do 2 damage to any Enemy."},"32":{"type":2,"cost":2,"cls":1,"hp":0,"tags":["Damage","Add Card"],"desc":"Do 3 damage to any Enemy. Add a Cannonball to your hand."},"33":{"type":2,"cost":2,"cls":3,"hp":0,"tags":["Damage"],"desc":"Pick a column. Do 2 damage to Enemies there and the column to its right."},"35":{"type":2,"cost":3,"cls":5,"hp":0,"tags":["Glitch","Damage","Draw"],"desc":"Glitch all Enemies, then do 1 damage to all Enemies. Draw a card."},"36":{"type":2,"cost":2,"cls":5,"hp":0,"tags":["Damage","Delete"],"desc":"Delete Lobby Enemies with 2Health or less, then do 2 damage to Lobby Enemies."},"37":{"type":2,"cost":3,"cls":4,"hp":0,"tags":["Damage"],"desc":"Pick a spot. Do 4 damage to an Enemy there, then 3 damage to Enemies next to it."},"38":{"type":2,"cost":4,"cls":2,"hp":0,"tags":["Damage","Spawn"],"desc":"Do 2 damage to all Enemies, then spawn 2 DCs on the highest % spots."},"39":{"type":2,"cost":1,"cls":4,"hp":0,"tags":["Increase Health"],"desc":"Give any Ally +2Health."},"40":{"type":2,"cost":1,"cls":3,"hp":0,"tags":["Draw","Increase Health","Damage"],"desc":"Give Penthouse Allies +2Health, then do 3 damage to Penthouse Enemies. Draw a card."},"41":{"type":2,"cost":1,"cls":8,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give Basement Allies +2Health. Draw a card."},"42":{"type":2,"cost":3,"cls":2,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give any Ally +6Health. Draw a card."},"43":{"type":2,"cost":4,"cls":3,"hp":0,"tags":["Spawn","Increase Health","Draw"],"desc":"Pick a column. Spawn 2 Rat-A-Babies (highest %) there or next to it. Give Allies there +3Health and Allies next to it +1Health. Draw a card."},"44":{"type":2,"cost":5,"cls":2,"hp":0,"tags":["Increase Health","Spawn"],"desc":"Spawn a DC on the highest % spot, then give all Allies +3Health."},"45":{"type":2,"cost":1,"cls":5,"hp":0,"tags":["Delete"],"desc":"Delete any Enemy with 2Health or less."},"47":{"type":2,"cost":1,"cls":5,"hp":0,"tags":["Damage","Glitch","Add Card"],"desc":"Glitch any Enemy then do 1 damage to it. Add a random 2Health or less Cyber Friend to your hand."},"48":{"type":2,"cost":4,"cls":5,"hp":0,"tags":["Delete","Glitch","Spawn"],"desc":"Pick a spot. Delete any Enemy there, then spawn a Glitchi there."},"49":{"type":2,"cost":5,"cls":3,"hp":0,"tags":["Damage","Spawn"],"desc":"Pick a column. Do 4 damage to Enemies there, then 3 damage to Enemies next to it, then spawn 3 Rat-A-Babies on the highest % spots in those columns."},"50":{"type":2,"cost":2,"cls":6,"hp":0,"tags":["Move","Draw"],"desc":"Reposition any Enemy. Draw a card."},"52":{"type":2,"cost":1,"cls":7,"hp":0,"tags":["Draw","Zap"],"desc":"Zap 2 of your opponent's Novas. Draw a card."},"53":{"type":2,"cost":2,"cls":7,"hp":0,"tags":["Damage","Zap"],"desc":"Do 2 damage to any Enemy. Zap 4 of your opponent's Novas."},"54":{"type":2,"cost":2,"cls":7,"hp":0,"tags":["Draw","Get Coin"],"desc":"Get 1 extra coin at the start of every Round. If Round 8 or later, draw a card."},"55":{"type":2,"cost":3,"cls":7,"hp":0,"tags":["Add Card"],"desc":"Add 2 random Superpowers to your hand."},"56":{"type":2,"cost":1,"cls":6,"hp":0,"tags":["Suspend"],"desc":"Suspend any column."},"60":{"type":3,"cost":1,"cls":3,"hp":0,"tags":["Damage","Move","Draw"],"desc":"Pick a column. Do 3 damage to Enemies there and they move to a random spot. Draw a card."},"63":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage"],"desc":"Do 2 damage to any Enemy then do 1 damage to random Enemies 3 times."},"64":{"type":3,"cost":1,"cls":7,"hp":0,"tags":["Zap","Get Coin"],"desc":"Get 1 extra coin at the start of every Round. Zap 5 of your opponent's Novas."},"65":{"type":3,"cost":1,"cls":7,"hp":0,"tags":["Draw","Get Coin"],"desc":"Add 2coin to your bank. Draw 2 cards."},"66":{"type":3,"cost":1,"cls":7,"hp":0,"tags":["Zap","Get Coin"],"desc":"Zap 7 of your opponent's Novas. Add 1coin to your Bank."},"67":{"type":3,"cost":1,"cls":3,"hp":0,"tags":["Damage","Spawn"],"desc":"Do 4 damage to any Enemy, then spawn an Allied Rat-A-Baby in its spot if open."},"68":{"type":3,"cost":1,"cls":6,"hp":0,"tags":["Fracture","Suspend","Add Card"],"desc":"Pick a spot. Fracture an Enemy there and Suspend the columns next to it. Add an Interference to your hand."},"70":{"type":3,"cost":1,"cls":4,"hp":0,"tags":["Draw","Increase Health","Bloom"],"desc":"Pick a spot. Give Allies there and surrounding it +1 Health and +3 Bloom. Draw a card."},"71":{"type":3,"cost":1,"cls":4,"hp":0,"tags":["Spawn","Bloom","Draw","Increase Health"],"desc":"Give all Allies +1Health and +2 Bloom, then spawn 2 Bloom Kittens on the highest % spots. Draw a card."},"72":{"type":3,"cost":1,"cls":3,"hp":0,"tags":["Draw","Increase Health","Spawn"],"desc":"Pick a spot. Give Allies there and surrounding it +1Health, then spawn 2 Joes on the highest % spots. Draw a card."},"73":{"type":3,"cost":1,"cls":5,"hp":0,"tags":["Damage","Glitch"],"desc":"Pick a spot. Glitch Enemies in that row. Do 3 damage to an Enemy there, then 1 damage to other Enemies in that row."},"74":{"type":3,"cost":1,"cls":2,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give any Ally +3Health and other Allies in its row and column +1Health. Draw a card."},"75":{"type":3,"cost":1,"cls":2,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give any Ally +4Health. Draw 2 cards."},"76":{"type":1,"cost":5,"cls":3,"hp":5,"tags":["When Played","Start of Energizing","Spawn","Damage"],"desc":"When Played and Start of Energizing: Does 2 damage to surrounding Enemies, then spawns random Rat-A-Baby."},"77":{"type":1,"cost":1,"cls":8,"hp":1,"tags":[],"desc":""},"78":{"type":1,"cost":1,"cls":8,"hp":2,"tags":["When Destroyed","Spawn"],"desc":"When Destroyed: Spawns 2 Snakeskins on the highest % spots (no Penthouse)."},"79":{"type":1,"cost":4,"cls":8,"hp":7,"tags":[],"desc":""},"80":{"type":1,"cost":2,"cls":8,"hp":2,"tags":["When Destroyed","Spawn","When Damaged","Transform"],"desc":"When Destroyed: Spawns a Flutter in its place. When Damaged: Transforms into a Flutter."},"81":{"type":1,"cost":3,"cls":8,"hp":4,"tags":["Start of Round","When Played","Spawn"],"desc":"When Played: Spawns a Splyt in the Basement of its column. Start of Round: Spawns a Splyt in the Lobby of its column."},"82":{"type":1,"cost":4,"cls":8,"hp":3,"tags":["When Played","Transform"],"desc":"When Played: Transforms Enemies in its row into Snakeskins."},"83":{"type":2,"cost":1,"cls":6,"hp":0,"tags":["Move","Increase Health"],"desc":"Reposition any Ally and give it +1Health."},"84":{"type":2,"cost":2,"cls":8,"hp":0,"tags":["Draw","Transform"],"desc":"Transform any Ally up 1coin. Draw a card."},"85":{"type":2,"cost":3,"cls":8,"hp":0,"tags":["Draw","Transform"],"desc":"Transform any Enemy down 3coin. Draw a card."},"86":{"type":2,"cost":3,"cls":8,"hp":0,"tags":["Transform","Add Card"],"desc":"Transform any Enemy with 3Health or less into an Allied Regan. Add a Makeover your hand."},"87":{"type":1,"cost":1,"cls":7,"hp":2,"tags":["When Played","When Destroyed","Add Card"],"desc":"When Played and When Destroyed: Adds a random 1coin Friend to your hand."},"88":{"type":1,"cost":3,"cls":7,"hp":4,"tags":["When Other Card Played","Add Card","When Played","When Destroyed"],"desc":"When Played, When you play any Power (1/round), and When Destroyed: Adds a random Power to your hand."},"89":{"type":2,"cost":2,"cls":1,"hp":0,"tags":["Damage"],"desc":"Do 2 damage to any Enemy and 1 damage to all other Enemies."},"90":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage","Add Card"],"desc":"Do 3 damage to any Enemy. Add a Silver Armory to your hand. Silver Armory: Do 3 damage to any Enemy. Add a Slicer to your hand."},"91":{"type":1,"cost":1,"cls":6,"hp":1,"tags":["When Played","Suspend","Other","Increase Health"],"desc":"When Played before Start of Energizing: Suspends its column. When anything Suspends 1 or more columns: Gains 1Health."},"92":{"type":1,"cost":1,"cls":5,"hp":1,"tags":["When Played","Damage","When Other Card Played"],"desc":"When Played and When any Cyber Ally is Played: Does 1 damage to Enemies next to it."},"93":{"type":3,"cost":1,"cls":5,"hp":0,"tags":["Damage","Spawn","Add Card"],"desc":"Pick a row. Do 1 damage to Enemies there, then spawn 2 Miniswipes on the highest % spots. Add a Miniswipe to your hand."},"94":{"type":2,"cost":5,"cls":8,"hp":0,"tags":["Transform","Spawn"],"desc":"Transform any Ally up 3coin and spawn a random copy of the new Ally OR Transform any Enemy into an Allied Khrys (Regan if PH)."},"95":{"type":3,"cost":1,"cls":8,"hp":0,"tags":["Transform"],"desc":"Transform any Ally up 3coin OR Transform any Enemy into a Snakeskin."},"96":{"type":2,"cost":2,"cls":5,"hp":0,"tags":["Glitch","Damage","Add Card"],"desc":"Glitch any Enemy, then do damage to it equal to half its Health rounded up. Add a Glitchi to your hand."},"97":{"type":1,"cost":3,"cls":3,"hp":2,"tags":["When Played","When Other Card Played","Increase Health"],"desc":"When Played: Gets +1Health for each other Ally. When any Moxie Ally is Played: Gets +1Health."},"98":{"type":2,"cost":3,"cls":7,"hp":0,"tags":["Draw","Eject"],"desc":"Eject any Ally or Enemy. Draw 2 cards."},"99":{"type":2,"cost":2,"cls":3,"hp":0,"tags":["Increase Health","Damage","Add Card"],"desc":"Pick a spot. Do 2 damage to any Enemy there, then give surrounding Allies +1Health. Add a random 3coin or less Moxie Ally with a damage ability to your hand."},"100":{"type":1,"cost":1,"cls":2,"hp":2,"tags":[],"desc":""},"101":{"type":2,"cost":1,"cls":1,"hp":0,"tags":["Destroy"],"desc":"Destroy any Basement Enemy."},"102":{"type":2,"cost":1,"cls":2,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give any Ally +1Health. Draw a card."},"103":{"type":3,"cost":1,"cls":8,"hp":0,"tags":["Transform"],"desc":"Transform any Ally up 3coin, then Transform other Allies in its row up 1coin."},"104":{"type":3,"cost":1,"cls":4,"hp":0,"tags":["Increase Health","Damage","Bloom"],"desc":"Pick a row. Give Allies there +2Health and +2 Bloom, then do 2 damage to Enemies there."},"105":{"type":2,"cost":1,"cls":2,"hp":0,"tags":["Spawn","Add Card"],"desc":"Spawn a random DC in the Lobby or Mezz. Add a random 2coin or less Energy Power to your hand."},"106":{"type":1,"cost":3,"cls":3,"hp":3,"tags":["When Played","Damage"],"desc":"When Played: Does 2 damage to Enemies in its column, then 1 damage to Enemies in the columns next to it."},"107":{"type":2,"cost":2,"cls":2,"hp":0,"tags":["Spawn","Add Card"],"desc":"Pick a spot. Spawn a Spike there, then spawn a Spike on the highest % spot. Add a Spike to your hand."},"108":{"type":2,"cost":2,"cls":2,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give any Lobby Ally +3Health and other Lobby Allies +1Health. Draw a card."},"109":{"type":2,"cost":2,"cls":4,"hp":0,"tags":["Draw","Increase Health","Bloom"],"desc":"Give all Allies +1Health and +1 Bloom. Draw a card."},"110":{"type":1,"cost":4,"cls":4,"hp":4,"tags":["When Played","Spawn","Damage","Bloom","When Damaged"],"desc":"2 Bloom When Played and When Damaged: Gives Allies next to it +2 Bloom, then does 2 damage to Enemies next to it, then spawns Seedlets there if empty."},"111":{"type":2,"cost":1,"cls":4,"hp":0,"tags":["Draw","Increase Health"],"desc":"Give any Mezz Ally +2Health and other Mezz Allies +1Health. Draw a card."},"112":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage"],"desc":"Do 8 damage to any Enemy. Add a Slicer to your opponent's hand."},"113":{"type":1,"cost":2,"cls":1,"hp":3,"tags":["When Energized","Add Card","When Played","Damage"],"desc":"When Played: Adds a random Boom Power to your hand. When Energized: Does 1 damage to a random Enemy."},"115":{"type":2,"cost":1,"cls":4,"hp":0,"tags":["Bloom","Draw"],"desc":"Give any Ally +2 Bloom and other Allies +1 Bloom. Draw a card."},"116":{"type":1,"cost":2,"cls":2,"hp":4,"tags":["When Played","Damage","Move","Start of Round"],"desc":"When Played: Does 1 damage to Enemies in its row and column then moves to a random spot. Start of Round: Moves to the highest % spot."},"117":{"type":2,"cost":3,"cls":1,"hp":0,"tags":["Destroy"],"desc":"Destroy any Enemy with 5Health or more."},"118":{"type":3,"cost":1,"cls":2,"hp":0,"tags":["Draw","Increase Health","Spawn"],"desc":"Pick a spot. Give any Ally there +2Health, or if empty spawn a DC there. Then spawn a DC on the highest % spot. Draw a card."},"119":{"type":2,"cost":6,"cls":3,"hp":0,"tags":["Destroy","Spawn"],"desc":"Pick a column. Destroy Enemies there, then fill empty spots there with a set of Moxie Allies: Executioner, Barber, Joe, and Rat-A-Pult."},"120":{"type":1,"cost":3,"cls":2,"hp":4,"tags":["When Other Card Played","Increase Health"],"desc":"When opponent plays any Power: Gets +2Health."},"121":{"type":2,"cost":3,"cls":1,"hp":0,"tags":["Destroy"],"desc":"Destroy any Lobby or Mezz Enemy."},"122":{"type":1,"cost":1,"cls":5,"hp":1,"tags":["Glitch","When Played"],"desc":"When Played: Glitches surrounding enemies"},"123":{"type":2,"cost":1,"cls":5,"hp":0,"tags":["Draw"],"desc":"Resets any Ally to its starting state (no When Played ability). Draw a card."},"125":{"type":1,"cost":2,"cls":5,"hp":2,"tags":["When Played","Delete","When Destroyed"],"desc":"When Played and When Destroyed: Deletes Enemies next to it with 2Health or less."},"126":{"type":1,"cost":5,"cls":5,"hp":9,"tags":["Hack","When Played","Start of Round"],"desc":"When Played and Start of Round: Hacks a random Enemy with 3Health or less."},"127":{"type":2,"cost":3,"cls":5,"hp":0,"tags":["Delete","Add Card"],"desc":"Delete any Enemy with 4Health or less. Add an Antivirus to your hand."},"128":{"type":2,"cost":5,"cls":5,"hp":0,"tags":["Hack"],"desc":"Hack any Enemy."},"129":{"type":3,"cost":1,"cls":5,"hp":0,"tags":["Hack"],"desc":"Hack any enemy with 3 Health or less."},"130":{"type":1,"cost":1,"cls":3,"hp":2,"tags":["Start of Energizing","Damage"],"desc":"Start of Energizing: Does 1 damage to Enemies in its column."},"131":{"type":2,"cost":3,"cls":3,"hp":0,"tags":["Increase Health","Damage","Draw"],"desc":"Pick a column. Give Allies there +3Health and do 3 damage to Enemies there. Draw a card."},"132":{"type":2,"cost":1,"cls":3,"hp":0,"tags":["Damage","Spawn","Move"],"desc":"Do 1 damage to any Enemy, then it moves to a random spot in its row. Spawn an Allied Rat-A-Baby in its place."},"133":{"type":2,"cost":4,"cls":8,"hp":0,"tags":["Transform","Spawn"],"desc":"Pick a column. Transform Enemies there down 2coin, then Transform Allies there up 2coin, then spawn a Snakeskin on the highest % spot in that column."},"134":{"type":1,"cost":4,"cls":8,"hp":3,"tags":["When Played","Transform","When Destroyed","Spawn","When Other Card Played"],"desc":"When Played: Transforms Allies next to it up 2coin. When any Magic Ally is Played: Transforms Allies next to it up 1coin (1/Round). When Destroyed: Respawns in the same spot."},"135":{"type":2,"cost":0,"cls":8,"hp":0,"tags":[],"desc":"While In Hand: This becomes the last Friend played from either player's Hand. It keeps this ability."},"136":{"type":2,"cost":2,"cls":8,"hp":0,"tags":["Damage","Add Card"],"desc":"Set any Enemy's Health to 1. Add a Reflection to your hand."},"137":{"type":1,"cost":1,"cls":8,"hp":2,"tags":["Transform","When Other Card Played","Spawn","When Destroyed"],"desc":"When any Magic Ally is Played: This Transforms into a random 2Coin Ally. When Destroyed: Spawns a Snakeskin in its place."},"138":{"type":1,"cost":5,"cls":8,"hp":9,"tags":["When Played","Spawn","Transform","Other"],"desc":"When Played: Spawns a Khrys on the highest % spot. When any Spot is Energized: Transforms any Ally there up 1coin."},"139":{"type":1,"cost":3,"cls":8,"hp":4,"tags":["When Damaged","Increase Health","Start of Round"],"desc":"Start of Round: Does 2 damage to itself. When Damaged: Gets +3Health."},"140":{"type":3,"cost":1,"cls":8,"hp":0,"tags":["Spawn","Transform"],"desc":"Transform any Ally up 1coin, then spawn a random copy of it."},"141":{"type":1,"cost":5,"cls":2,"hp":5,"tags":["When Played","Start of Round","Increase Health","Spawn"],"desc":"When Played and Start of Round: Gives Lobby Allies in its column and columns next to it +2Health, then spawns DCs there."},"142":{"type":1,"cost":5,"cls":4,"hp":5,"tags":["When Played","When Energized","Increase Health","Bloom","When Destroyed","Spawn"],"desc":"2 Bloom When Played: Spawns a Bloom Cat on the highest % spot. When Energized and When Destroyed: Gives other Allies +1Health and +1 Bloom."},"143":{"type":2,"cost":2,"cls":4,"hp":0,"tags":["Increase Health","Bloom","Draw"],"desc":"Give any Ally +3Health and +3 Bloom. Draw a card."},"144":{"type":2,"cost":4,"cls":4,"hp":0,"tags":["Increase Health","Spawn","Bloom"],"desc":"Pick a spot. If empty, spawn a Seedlet there. Then give all Allies +1Health and +1 Bloom, then spawn a Waterer on the highest % spot."},"145":{"type":1,"cost":1,"cls":1,"hp":2,"tags":["When Energized","Damage","When Other Card Played"],"desc":"When Energized and When any Boom Ally is Played: Does 1 damage to a random Enemy."},"146":{"type":2,"cost":5,"cls":1,"hp":0,"tags":["Damage"],"desc":"Do 4 damage to any Enemy then 3 damage to random Enemies 3 times."},"147":{"type":2,"cost":4,"cls":1,"hp":0,"tags":["Damage"],"desc":"Do 9 damage to any Enemy and 1 damage to all other Enemies."},"148":{"type":1,"cost":3,"cls":2,"hp":5,"tags":[],"desc":""},"149":{"type":1,"cost":5,"cls":3,"hp":9,"tags":[],"desc":""},"150":{"type":1,"cost":1,"cls":7,"hp":1,"tags":["When Played","Draw"],"desc":"When Played: Draws a card."},"151":{"type":1,"cost":2,"cls":7,"hp":3,"tags":["When Energized","Zap","When Played","When Other Card Played"],"desc":"When Played, and When any Cosmic Ally is Played: Zaps 1 of opponent's Novas. When Energized: Zaps 2 of opponent's Novas."},"152":{"type":2,"cost":1,"cls":7,"hp":0,"tags":["Draw"],"desc":"Draw 2 cards. If Round 10 or later, opponent also draws a card."},"153":{"type":2,"cost":2,"cls":2,"hp":0,"tags":["Increase Health"],"desc":"Give any Ally +1Health per Enemy & +3 extra Health, then give all Enemies +1Health."},"154":{"type":2,"cost":4,"cls":7,"hp":0,"tags":["Get Coin","Zap","Add Card","Spawn"],"desc":"Get 1 extra coin every Start of Round. Zap 1 opponent Novas. Add a random Superpower to your hand. Spawn an IP on highest % spot."},"155":{"type":1,"cost":2,"cls":4,"hp":3,"tags":["When Played","Bloom","Other","Add Card"],"desc":"When Played: Gives +2 Bloom to surrounding Allies. When any Ally Blooms or gains Bloom: Adds a Growth Spray to your hand (1/Round)."},"156":{"type":1,"cost":5,"cls":1,"hp":5,"tags":["When Energized","When Destroyed","Destroy","When Played"],"desc":"When Played, When Energized, and When Destroyed: Destroys a random Enemy."},"157":{"type":2,"cost":1,"cls":7,"hp":0,"tags":["Eject","Get Coin"],"desc":"Eject any Ally and add 2 coin to your Bank. It stays your turn."},"158":{"type":1,"cost":3,"cls":7,"hp":6,"tags":["Zap","When Energized"],"desc":"When Energized: Instead of collecting Novas, Zaps your opponent's Novas equal to its health."},"159":{"type":2,"cost":1,"cls":6,"hp":0,"tags":["Fracture","Add Card"],"desc":"Fracture any Enemy with 4Health or less. Add a 3 coin or less Distortion Power to your hand."},"160":{"type":2,"cost":4,"cls":6,"hp":0,"tags":["Move","Spawn"],"desc":"Reposition any Ally or Enemy. Spawn an Allied Time Trooper in its place."},"161":{"type":2,"cost":2,"cls":6,"hp":0,"tags":["Override","Draw"],"desc":"Pick a column. Override that column and the one to its right to the Basement. Draw a card."},"162":{"type":2,"cost":3,"cls":6,"hp":0,"tags":["Move","Draw"],"desc":"Swap an Ally or Enemy with another Ally or Enemy. Draw a card."},"164":{"type":3,"cost":1,"cls":6,"hp":0,"tags":["Move","Add Card"],"desc":"Reposition any Ally or Enemy. Add a copy of this card to your hand at the start of the next round."},"165":{"type":1,"cost":1,"cls":6,"hp":1,"tags":["Start of Energizing"],"desc":"Can't be Transformed. Allies can be played on this. Start of Energizing: Disappears unless it spawned after Start of Energizing."},"166":{"type":2,"cost":1,"cls":6,"hp":0,"tags":["Spawn","Draw","Other"],"desc":"Pick a row. Spawn Obstructors in empty spots there. Draw a card. Add 2 Obstructors to Opponent's hand."},"167":{"type":1,"cost":5,"cls":6,"hp":6,"tags":["When Played","Start of Energizing","When Destroyed","Fracture"],"desc":"When Played, Start of Energizing, and When Destroyed: Fractures Surrounding Enemies."},"168":{"type":1,"cost":3,"cls":6,"hp":4,"tags":["When Played","Start of Round","Fracture"],"desc":"When Played and Start of Round: Fractures Enemies next to it."},"169":{"type":1,"cost":3,"cls":6,"hp":4,"tags":["Override","When Played"],"desc":"When Played before Start of Energizing: Overrides its column to its spot."},"170":{"type":1,"cost":1,"cls":6,"hp":2,"tags":["When Played","Spawn","Start of Round"],"desc":"When Played and Start of Round: Spawns Obstructors next to it."},"171":{"type":3,"cost":1,"cls":6,"hp":0,"tags":["Override","Fracture"],"desc":"Pick a spot (no Penthouse). Override that column to that spot. Fracture all Enemies on and surrounding that spot."},"172":{"type":1,"cost":2,"cls":1,"hp":3,"tags":["Start of Energizing","Start of Round","Damage","When Destroyed"],"desc":"When Destroyed, Start of Round, and Start of Energizing: Does 1 damage to a random Enemy."},"173":{"type":1,"cost":3,"cls":4,"hp":6,"tags":["When Played","Start of Round","Spawn"],"desc":"When Played: Spawns 2 Bloom Kittens on the highest % spots. Start of Round: Spawns a Bloom Kitten on the highest % spot."},"174":{"type":1,"cost":2,"cls":4,"hp":2,"tags":["When Destroyed","Spawn","Start of Round","Bloom"],"desc":"2 Bloom Start of Round: Gains +1 Bloom. When Destroyed: Spawns a Weade on the highest % spot."},"175":{"type":1,"cost":1,"cls":4,"hp":2,"tags":["When Energized","Increase Health"],"desc":"When Energized: Gives +1Health to Allies next to it."},"176":{"type":1,"cost":1,"cls":3,"hp":1,"tags":[],"desc":""},"179":{"type":1,"cost":2,"cls":2,"hp":2,"tags":["Other","Increase Health","When Played"],"desc":"When Played and When this gains Health: Gives itself and all surrounding Allies +1Health (1/Round)."},"180":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage","Add Card"],"desc":"Do 3 damage to any Enemy. Add a Silver Armory to your hand. Silver Armory: Do 3 damage to any Enemy. Add a Slicer to your hand."},"182":{"type":1,"cost":3,"cls":1,"hp":3,"tags":["When Destroyed","Damage","Start of Round"],"desc":"When Destroyed: Does 1 damage to surrounding Enemies, then spawns a random Blazer. Start of Round: Destroys itself if not spawned this round."},"183":{"type":2,"cost":1,"cls":1,"hp":0,"tags":["Damage","Draw"],"desc":"Do 1 damage to any Enemy. Draw a card."},"184":{"type":1,"cost":3,"cls":7,"hp":11,"tags":["Other"],"desc":"When Opponent Would Collect Novas From Energizing: This takes damage instead, then Collects 1 Novas."},"185":{"type":1,"cost":3,"cls":4,"hp":7,"tags":["Bloom","Spawn","Start of Energizing","When Damaged"],"desc":"Can't collect Novas. Start of Energizing and When Damaged: Gives surrounding Allies +2Bloom, then spawns a random Seedlet in the Lobby or Mezz."},"186":{"type":1,"cost":4,"cls":5,"hp":4,"tags":["When Played","Start of Energizing"],"desc":"When Played (1/Round) and Start of Energizing: Unglitches surrounding Allies, then triggers their When Played abilities."},"187":{"type":1,"cost":2,"cls":8,"hp":4,"tags":["Spawn","When Played","Other"],"desc":"When Played: Spawns a Snakeskin on the highest % spot. When any Ally is Destroyed: Spawns a Snakeskin in its spot."},"188":{"type":1,"cost":1,"cls":7,"hp":3,"tags":["When Destroyed","Draw","Get Coin"],"desc":"When Destroyed: Draws a card and adds 1 coin to Opponent's bank."},"189":{"type":1,"cost":3,"cls":1,"hp":5,"tags":["When Played","When Energized","Start of Round","Damage"],"desc":"When Played, When Energized, and Start of Round: If its Health is odd, does 1 damage to itself and surrounding Allies. If even, does 2 damage to surrounding Enemies."},"190":{"type":1,"cost":3,"cls":5,"hp":6,"tags":["Other"],"desc":"When any Ally is Played: Re-Trigger that Ally's When Played abilities."},"191":{"type":1,"cost":2,"cls":3,"hp":2,"tags":["When Played","Start of Round","Spawn","Increase Health"],"desc":"When Played: Gives all other Allied Reruns +1Health. Start of Round (if not spawned this round): Spawns a random Rerun."},"192":{"type":2,"cost":1,"cls":8,"hp":0,"tags":["Transform","Spawn"],"desc":"Transform any Ally down 1coin, then spawn a random copy of the new Ally."},"193":{"type":2,"cost":3,"cls":4,"hp":0,"tags":["Increase Health","Bloom","Draw"],"desc":"Pick a spot. Give Allies there and surrounding +1 Bloom, then +Health equal to their Bloom. Draw a card."},"194":{"type":2,"cost":3,"cls":6,"hp":0,"tags":[],"desc":"Pick an Enemy. Fracture all Enemies in that row, then move that Enemy to the lowest % spot. It stays your turn."},"300":{"type":3,"cost":1,"cls":2,"hp":0,"tags":["Increase Health","Add Card"],"desc":"Give any Ally +3Health. Add a copy of this card to your hand at the start of next round."},"301":{"type":3,"cost":1,"cls":2,"hp":0,"tags":["Increase Health","Draw"],"desc":"Double any Ally's Health. Draw a card."},"302":{"type":3,"cost":1,"cls":2,"hp":0,"tags":["Damage","Increase Health"],"desc":"Pick a spot. Give Allies in that row +2Health, then do 1 damage to Enemies in that column, then do 1 damage to Enemies in that row."},"303":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage"],"desc":"Pick a spot. Do 3 damage to an Enemy there, then 1 damage to surrounding Enemies, then 1 damage to all Enemies."},"304":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage","Draw"],"desc":"Do 6 damage to any Enemy. Draw a card."},"305":{"type":3,"cost":1,"cls":1,"hp":0,"tags":["Damage","Draw"],"desc":"Do 3 damage to any Enemy, then do 3 damage to a random Enemy. Draw a card."},"306":{"type":3,"cost":1,"cls":4,"hp":0,"tags":["Bloom","Increase Health","Draw"],"desc":"Pick a row. Give Allies there +1 Bloom, then +Health equal to their Bloom (4Health max). Draw a card."},"307":{"type":3,"cost":1,"cls":4,"hp":0,"tags":["Damage","Spawn","Increase Health"],"desc":"Do 2 damage to Lobby Enemies, then give Lobby Allies +1Health, then spawn 2 Seedlets on the highest % spots."},"308":{"type":3,"cost":1,"cls":4,"hp":0,"tags":["Bloom","Increase Health","Draw"],"desc":"Give any Ally +2 Bloom, then give it +Health equal to its Bloom. Draw a card."},"309":{"type":3,"cost":1,"cls":3,"hp":0,"tags":["Spawn","Draw","Increase Health"],"desc":"Spawn 2 Rat-A-Babies on the highest % spots, then spawn 2 random Rat-A-Babies, then give all Rat-A-Babies +1Health. Draw a card."},"310":{"type":3,"cost":1,"cls":3,"hp":0,"tags":["Damage","Draw","Move","Spawn"],"desc":"Do 3 damage to any Enemy then it moves to the lowest % spot. Spawn an Allied Rat-A-Baby in its place. Draw a card."},"311":{"type":3,"cost":1,"cls":3,"hp":0,"tags":["Increase Health","Damage","Draw","Spawn"],"desc":"Spawn a Rat-A-Baby on the highest % spot, then give all Allies +1Health, then do 1 damage to all Enemies. Draw a card."},"312":{"type":3,"cost":1,"cls":7,"hp":0,"tags":["Get Coin"],"desc":"Reduce the cost of all cards currently in your hand by 1 coin (minimum 1)."},"313":{"type":3,"cost":1,"cls":7,"hp":0,"tags":["Zap","Get Coin"],"desc":"Zap 10 of each player's Novas. Add 2 coin to your Bank."},"314":{"type":3,"cost":1,"cls":7,"hp":0,"tags":["Add Card"],"desc":"Add 2 random Superpowers (includes unlockable) to your hand."},"315":{"type":3,"cost":1,"cls":5,"hp":0,"tags":["Delete","Glitch","Spawn"],"desc":"Pick a spot. Delete an Enemy there with 3Health or less, then Glitch Enemies in its row and spawn a Nightswipe there."},"316":{"type":3,"cost":1,"cls":5,"hp":0,"tags":["Hack","Draw"],"desc":"Pick a spot. Do 1 damage to an Enemy there, then Hack all Enemies with 1Health. Draw a card."},"317":{"type":3,"cost":1,"cls":5,"hp":0,"tags":["Add Card"],"desc":"Unglitch any Ally, then trigger its When Played abilities. Add a copy of this card to your hand at the start of next Round."},"318":{"type":3,"cost":1,"cls":8,"hp":0,"tags":["Spawn"],"desc":"Pick an Ally or Enemy. Spawn an Allied copy of it on the highest % spot."},"319":{"type":3,"cost":1,"cls":8,"hp":0,"tags":["Transform"],"desc":"Pick a row. Transform Enemies there down 1 coin, then Transform Allies there up 1 coin."},"320":{"type":3,"cost":1,"cls":8,"hp":0,"tags":["Transform"],"desc":"Pick a spot. Transform an Ally there up 1 coin, then repeat 2x."},"321":{"type":3,"cost":1,"cls":6,"hp":0,"tags":["Override","Add Card"],"desc":"Pick an Ally (no Penthouse). Override that column to that spot. Add a copy of this card to your hand at the start of next round."},"322":{"type":3,"cost":1,"cls":6,"hp":0,"tags":["Suspend","Move","Add Card"],"desc":"Suspend any column and the column to its right. Move Allies in both columns to the highest % spot. Add a Time Delay and a Transporter to your hand."},"323":{"type":3,"cost":1,"cls":6,"hp":0,"tags":["Move"],"desc":"Pick a spot. Move all Enemies in that row to the lowest % spot, then move all Allies in that row and column to the highest % spot."}};
+// END CARD_META
 const CARD_CLASS_NAMES = {
   0: "Nil", 1: "Boom", 2: "Energy", 3: "Moxie", 4: "Floral",
   5: "Cyber", 6: "Distortion", 7: "Cosmic", 8: "Magic"

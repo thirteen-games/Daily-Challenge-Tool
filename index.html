@@ -946,6 +946,8 @@
   <label>Anthropic API Key:</label>
   <input type="password" id="apiKeyInput" placeholder="sk-ant-..." oninput="saveApiKey()">
   <span class="hint">Optional — enables AI theming</span>
+  <label style="margin-left:16px;">AI Theme model:</label>
+  <select id="aiModelSelect" onchange="saveAiModel()" style="padding:6px 8px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;"></select>
 </div>
 
 <div class="main-layout active" id="challengeLayout" style="display:grid;">
@@ -1978,6 +1980,12 @@ function init() {
   // Load settings from localStorage
   const savedKey = localStorage.getItem('anthropic_api_key') || '';
   document.getElementById('apiKeyInput').value = savedKey;
+  const modelSel = document.getElementById('aiModelSelect');
+  modelSel.innerHTML = AI_THEME_MODELS.map(([id, label]) => `<option value="${id}">${label}</option>`).join('');
+  if (!AI_THEME_MODELS.some(([id]) => id === localStorage.getItem('anthropic_model'))) {
+    localStorage.removeItem('anthropic_model');
+  }
+  modelSel.value = getAIThemeModel();
 
   // Populate SP selects
   updateSpSelect('p0');
@@ -3217,8 +3225,20 @@ function extractResponseText(data) {
 // AI THEME HELPERS — card knowledge, directive parsing, structured output
 // ============================================================
 
-// Model used by the AI Theme generator on the challenge tab. One place to change.
-const AI_THEME_MODEL = 'claude-sonnet-4-6';
+// Model used by the AI Theme generator on the challenge tab. Selectable in
+// ⚙ Settings (persisted in localStorage); Opus 5 by default.
+const AI_THEME_MODEL_DEFAULT = 'claude-opus-5';
+const AI_THEME_MODELS = [
+  ['claude-opus-5',     'Claude Opus 5 — most capable (default)'],
+  ['claude-sonnet-5',   'Claude Sonnet 5 — faster'],
+  ['claude-sonnet-4-6', 'Claude Sonnet 4.6 — previous default'],
+];
+function getAIThemeModel() {
+  return localStorage.getItem('anthropic_model') || AI_THEME_MODEL_DEFAULT;
+}
+function saveAiModel() {
+  localStorage.setItem('anthropic_model', document.getElementById('aiModelSelect').value);
+}
 
 const WORD_NUMBERS = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,
   eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20};
@@ -3665,7 +3685,7 @@ ${buildCardCatalogue()}`;
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
-        model: AI_THEME_MODEL,
+        model: getAIThemeModel(),
         max_tokens: 6000,
         system: systemPrompt,
         tools: [DECK_BUILDER_TOOL],

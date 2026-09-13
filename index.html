@@ -3240,7 +3240,7 @@ function saveAiModel() {
   localStorage.setItem('anthropic_model', document.getElementById('aiModelSelect').value);
 }
 
-const WORD_NUMBERS = {one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,
+const WORD_NUMBERS = {no:0,zero:0,none:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,
   eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20};
 function wordToCount(s) {
   if (!s) return null;
@@ -3300,17 +3300,69 @@ function buildCardCatalogue() {
   return s;
 }
 
+// Words a designer might use for an ability, mapped to the Novadex tag(s) in CARD_META.
+// Order matters only for ties at the same text position (multi-word phrases first).
+const TAG_SYNONYMS = [
+  [/\bwhen (?:an?other|other) cards? (?:is |are )?played\b/, ['When Other Card Played']],
+  [/\bwhen played\b/, ['When Played']],
+  [/\bwhen energi[sz]ed\b/, ['When Energized']],
+  [/\bwhen destroyed\b|\bon death\b/, ['When Destroyed']],
+  [/\bwhen damaged\b/, ['When Damaged']],
+  [/\bstart of (?:the )?round\b/, ['Start of Round']],
+  [/\bstart of energi[sz]ing\b/, ['Start of Energizing']],
+  [/\badds? (?:a )?cards?\b/, ['Add Card']],
+  [/\bspawn(?:s|ed|ing|er)?\b|\bsummon(?:s|ed|ing)?\b/, ['Spawn']],
+  [/\bbloom(?:s|ed|ing)?\b/, ['Bloom']],
+  [/\bdamag(?:e|es|ed|ing)\b|\battack(?:s|ed|ing)?\b/, ['Damage']],
+  [/\bdraw(?:s|ing)?\b/, ['Draw']],
+  [/\bzap(?:s|ped|ping)?\b/, ['Zap']],
+  [/\bmov(?:e|es|ed|ing)\b|\breposition(?:s|ed|ing)?\b/, ['Move']],
+  [/\bglitch(?:es|ed|ing)?\b/, ['Glitch']],
+  [/\bhack(?:s|ed|ing)?\b/, ['Hack']],
+  [/\bfractur(?:e|es|ed|ing)\b/, ['Fracture']],
+  [/\bdestroy(?:s|ed|ing)?\b/, ['Destroy']],
+  [/\bdelet(?:e|es|ed|ing)\b/, ['Delete']],
+  [/\btransform(?:s|ed|ing)?\b/, ['Transform']],
+  [/\bsuspend(?:s|ed|ing)?\b/, ['Suspend']],
+  [/\beject(?:s|ed|ing)?\b/, ['Eject']],
+  [/\bheal(?:s|ed|ing)?\b|\bhealth\b/, ['Increase Health', 'Add Health']],
+  [/\bcoins?\b|\bincome\b/, ['Get Coin']],
+  [/\boverrid(?:e|es|ing)\b/, ['Override']],
+];
+const CLASS_WORDS = { boom: 1, energy: 2, moxie: 3, floral: 4, cyber: 5, distortion: 6, cosmic: 7, magic: 8 };
+
+// Find the earliest ability-tag or class word in a phrase. Returns {tags,label} | {cls,label} | null.
+function parseQualifier(phrase) {
+  const p = phrase.toLowerCase();
+  let best = null;
+  for (const [re, tags] of TAG_SYNONYMS) {
+    const m = p.match(re);
+    if (m && (!best || m.index < best.index)) best = { index: m.index, tags, label: tags[0] };
+  }
+  for (const [w, cls] of Object.entries(CLASS_WORDS)) {
+    const m = p.match(new RegExp(`\\b${w}\\b`));
+    if (m && (!best || m.index < best.index)) best = { index: m.index, cls, label: CARD_CLASS_NAMES[cls] };
+  }
+  if (!best) return null;
+  delete best.index;
+  return best;
+}
+
 // Parse explicit, machine-checkable deck requirements out of free text so they
 // are enforced in JS no matter what the model returns:
 //   - named cards / #IDs / [id, id] lists  → forced into (or excluded from) a deck
 //   - "N random superpowers"               → N random superpower cards added
 //   - "N superpowers" (no "random")        → exactly N superpower cards, model's choice
 //   - "N friends" / "N powers"             → per-deck friend/power counts
+//     ("0 friends or powers", "no friends and no powers", "only superpowers" set both)
+//   - qualifiers on the superpowers         → "at least 5 … have a spawn ability",
+//     "all of them Boom", "5 spawn superpowers" become tag/class minimums that the
+//     picker honours; an unrecognised qualifier hands the choice to the model
 // Scope words ("player deck", "bot deck", "both") pick which side(s) a clause
 // applies to; an unscoped clause inherits the previous clause's scope, else both.
 function parseDeckDirectives(text) {
-  const mk = () => ({ forceIds: [], excludeIds: [], randomSupers: 0, numSupers: null, numFriends: null, numPowers: null });
-  const out = { p0: mk(), p1: mk(), summary: [], any: false };
+  const mk = () => ({ forceIds: [], excludeIds: [], randomSupers: 0, numSupers: null, numFriends: null, numPowers: null, superConstraints: [], modelPicksSupers: false });
+  const out = { p0: mk(), p1: mk(), summary: [], notes: [], any: false };
   if (!text) return out;
 
   // Longest names first so "Joe Clone" wins over "Joe" and "Bloom Cat" over "Bloomer".
@@ -3323,8 +3375,12 @@ function parseDeckDirectives(text) {
   nameIndex.sort((a, b) => b.n.length - a.n.length);
   const esc = str => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+  const KIND = 'super\\s*powers?|supers?|friends?|powers?';
+  const NUM = '\\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|no|zero|none';
+  const kindOf = k => { k = (k || '').replace(/\s+/g, ''); return /^super/.test(k) ? 'super' : /^friend/.test(k) ? 'friend' : 'power'; };
   const clauses = text.split(/\n|;|\.\s|\bthen\b|\balso\b|\bmeanwhile\b/i).map(x => x.trim()).filter(Boolean);
   let lastScope = null;
+  const superScopeSeen = new Set(); // sides that already have a superpower-count directive
   for (const raw of clauses) {
     const c = raw.toLowerCase();
     const mentionsBot = /\b(bot|opponent|enemy|ai|computer|p1)\b/.test(c);
@@ -3332,6 +3388,7 @@ function parseDeckDirectives(text) {
     const both = /\b(both|each|either|every)\b/.test(c) || (mentionsBot && mentionsPlayer);
     const scope = both ? ['p0', 'p1'] : mentionsBot ? ['p1'] : mentionsPlayer ? ['p0'] : (lastScope || ['p0', 'p1']);
     if (mentionsBot || mentionsPlayer || both) lastScope = scope;
+    const scopeLabel = scope.join('+');
 
     const excluding = /\b(no|without|exclude|excluding|avoid|not|never|remove|ban|except)\b/.test(c)
                    && !/\b(put|include|add|use|give|with|specifically|these cards|following)\b/.test(c);
@@ -3352,27 +3409,86 @@ function parseDeckDirectives(text) {
     const idList = [...ids].filter(id => ALL_CARDS[id]);
     if (idList.length) {
       for (const side of scope) (excluding ? out[side].excludeIds : out[side].forceIds).push(...idList);
-      out.summary.push(`${excluding ? 'Exclude' : 'Force'} ${idList.map(id => `${getCardDisplayName(id)} (ID=${id})`).join(', ')} → ${scope.join('+')}`);
+      out.summary.push(`${excluding ? 'Exclude' : 'Force'} ${idList.map(id => `${getCardDisplayName(id)} (ID=${id})`).join(', ')} → ${scopeLabel}`);
     }
 
-    // --- counts: "10 random superpowers", "pick 3 supers", "5 friends and 2 powers"
-    const countRe = /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty)\s+(random\s+|different\s+|unique\s+)?(super\s*powers?|supers?|friends?|powers?)\b/g;
+    // --- "only superpowers": no friends, no powers
+    if (/\b(only|just|nothing but|purely|exclusively)\s+(random\s+)?(super\s*powers?|supers?)\b|\b(super\s*powers?|supers?)\s+only\b/.test(c)) {
+      for (const side of scope) { out[side].numFriends = 0; out[side].numPowers = 0; }
+      out.summary.push(`superpowers only (0 friends, 0 powers) → ${scopeLabel}`);
+    }
+
+    // --- counts: "10 random superpowers", "5 friends and 2 powers", "0 friends or powers", "no friends"
+    //     A trailing "or/and <kind>" without its own number shares the count ("0 friends or powers").
+    const countRe = new RegExp(`\\b(${NUM})\\s+(random\\s+|different\\s+|unique\\s+)?(${KIND})\\b(?:\\s*(?:,|and|or|/|&|nor)\\s*(?:no\\s+)?(${KIND})\\b)?`, 'g');
     for (const m of c.matchAll(countRe)) {
       const n = wordToCount(m[1]);
       if (n === null) continue;
       const isRandom = /^random/.test(m[2] || '');
-      const kind = m[3].replace(/\s+/g, '');
+      const kinds = [kindOf(m[3])];
+      if (m[4]) kinds.push(kindOf(m[4]));
       // "3 superpowers from the professional" is the loadout, not deck cards
-      if (/^super/.test(kind) && /\b(loadout|professional|pro's|pros)\b/.test(c)) continue;
-      let what;
-      for (const side of scope) {
-        if (/^super/.test(kind)) {
-          if (isRandom) { out[side].randomSupers += n; what = 'random superpower cards'; }
-          else { out[side].numSupers = n; what = 'superpower cards (model picks)'; }
-        } else if (/^friend/.test(kind)) { out[side].numFriends = n; what = 'friends'; }
-        else { out[side].numPowers = n; what = 'powers'; }
+      if (kinds.includes('super') && /\b(loadout|professional|pro's|pros)\b/.test(c)) continue;
+      for (const kind of kinds) {
+        let what;
+        for (const side of scope) {
+          if (kind === 'super') {
+            superScopeSeen.add(side);
+            if (isRandom) { out[side].randomSupers += n; what = 'random superpower cards'; }
+            else { out[side].numSupers = n; what = 'superpower cards (model picks)'; }
+          } else if (kind === 'friend') { out[side].numFriends = n; what = 'friends'; }
+          else { out[side].numPowers = n; what = 'powers'; }
+        }
+        out.summary.push(`${n} ${what} → ${scopeLabel}`);
       }
-      out.summary.push(`${n} ${what} → ${scope.join('+')}`);
+    }
+
+    // --- qualifiers on the superpower cards
+    const aboutSupers = /\b(super\s*powers?|supers?)\b/.test(c) || scope.some(side => superScopeSeen.has(side));
+    if (!aboutSupers) continue;
+    let constraint = null;
+    let m;
+    if ((m = c.match(new RegExp(`\\bat least\\s+(${NUM})\\b(.*)$`)))) {
+      const q = parseQualifier(m[2]), n = wordToCount(m[1]);
+      if (q && n !== null) constraint = { min: n, qual: q };
+    } else if ((m = c.match(new RegExp(`\\b(${NUM})\\s+of\\s+(?:them|those|these|which|the\\s+(?:super\\s*powers?|supers?|cards?))\\b(.*)$`)))) {
+      const q = parseQualifier(m[2]), n = wordToCount(m[1]);
+      if (q && n !== null) constraint = { min: n, qual: q };
+    } else if ((m = c.match(/\b(?:super\s*powers?|supers?)\s+(?:that|which|who)\s+(.*)$/))) {
+      // "superpowers that heal" — a relative clause applies to all of them
+      const q = parseQualifier(m[1]);
+      if (q) constraint = { min: Infinity, qual: q };
+    } else if ((m = c.match(/\b(all|every one|each one|each|only|exclusively)\b(.*)$/))) {
+      const q = parseQualifier(m[2]);
+      if (q) constraint = { min: Infinity, qual: q };
+    } else if ((m = c.match(new RegExp(`\\b(${NUM})\\s+(?:random\\s+)?([a-z][a-z ]*?)\\s+(super\\s*powers?|supers?)\\b`)))) {
+      // "5 spawn superpowers" — the qualifier sits between the number and the kind
+      const q = parseQualifier(m[2]), n = wordToCount(m[1]);
+      if (q && n !== null) {
+        constraint = { min: n, qual: q };
+        for (const side of scope) {
+          if (out[side].numSupers === null && out[side].randomSupers === 0) { out[side].numSupers = n; superScopeSeen.add(side); }
+        }
+      }
+    }
+    if (constraint) {
+      for (const side of scope) {
+        out[side].superConstraints.push({ min: constraint.min, tags: constraint.qual.tags || null, cls: constraint.qual.cls !== undefined ? constraint.qual.cls : null, label: constraint.qual.label });
+      }
+      out.summary.push(`${constraint.min === Infinity ? 'all' : '≥' + constraint.min} of the superpower cards with ${constraint.qual.label} → ${scopeLabel}`);
+    } else if (/\b(at least|at most|make sure|ensure|must|should|that have|having|with an?|abilit(?:y|ies))\b/.test(c)) {
+      // A qualifier the tool can't check: let the model choose those superpowers instead of picking at random.
+      let converted = false;
+      for (const side of scope) {
+        if (out[side].randomSupers > 0) {
+          out[side].numSupers = (out[side].numSupers || 0) + out[side].randomSupers;
+          out[side].randomSupers = 0;
+          out[side].modelPicksSupers = true;
+          converted = true;
+        }
+      }
+      if (converted) out.summary.push(`model picks the superpower cards to satisfy "${raw.trim()}" → ${scopeLabel}`);
+      out.notes.push(`Couldn't verify "${raw.trim()}" — left to the model.`);
     }
   }
   for (const side of ['p0', 'p1']) {
@@ -3656,8 +3772,9 @@ ${buildProfessionalList()}`;
       const f = d.numFriends !== null ? d.numFriends : numFriends;
       const p = d.numPowers !== null ? d.numPowers : numPowers;
       let extra = '';
-      if (d.randomSupers > 0) extra += ` (+ ${d.randomSupers} random Superpower card${d.randomSupers === 1 ? '' : 's'} the tool will add — leave superpower_card_ids empty unless specific superpowers were named)`;
-      if (d.numSupers !== null) extra += ` + exactly ${d.numSupers} Superpower card${d.numSupers === 1 ? '' : 's'} of your choice in superpower_card_ids`;
+      const cons = d.superConstraints.map(k => `${k.min === Infinity ? 'all' : 'at least ' + k.min} with ${k.label}`).join(', ');
+      if (d.randomSupers > 0) extra += ` (+ ${d.randomSupers} random Superpower card${d.randomSupers === 1 ? '' : 's'} the tool will add${cons ? ', ' + cons : ''} — leave superpower_card_ids empty unless specific superpowers were named)`;
+      if (d.numSupers !== null) extra += ` + exactly ${d.numSupers} Superpower card${d.numSupers === 1 ? '' : 's'} of your choice in superpower_card_ids${cons ? ' (' + cons + ')' : ''}`;
       return `- ${label} deck: ${f} Friend card${f === 1 ? '' : 's'} + ${p} Power card${p === 1 ? '' : 's'}${extra}`;
     };
     userPrompt = `Designer's theme / instructions:
@@ -3712,7 +3829,10 @@ ${buildCardCatalogue()}`;
 
     applyAIResult(result, effectiveNumFriends, effectiveNumPowers, useSlotMode, directives);
 
-    if (directives.any) showToast('Enforced: ' + directives.summary.join(' · '));
+    const toastBits = [];
+    if (directives.any) toastBits.push('Enforced: ' + directives.summary.join(' · '));
+    toastBits.push(...directives.notes);
+    if (toastBits.length) showToast(toastBits.join(' — '));
     statusEl.textContent = 'Done! Decks generated.';
     statusEl.className = 'ai-status success';
     setTimeout(() => closeAIModal(), 800);
@@ -3730,6 +3850,7 @@ function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS, directi
   const validPowerIds  = new Set(POWER_CARDS.map(c => c.id));
   const validSuperIds  = new Set(SUPERPOWER_CARDS.map(c => c.id));
   const uniq = arr => [...new Set(arr)];
+  const sideName = side => side === 'p0' ? 'player' : 'bot';
   const themeText = document.getElementById('aiThemeInput').value;
   const classUniquenessRequested = /one card (from|per|of) each class|each class.{0,20}once|exactly one.{0,20}class|unique class/i.test(themeText);
 
@@ -3782,14 +3903,45 @@ function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS, directi
       powerIds  = fit(powerIds,  POWER_CARDS,  targetP);
     }
 
-    // Superpower cards in the deck: random top-ups and exact counts from the text
-    if (d) {
-      const pool = () => SUPERPOWER_CARDS.map(c => c.id).filter(id => !superIds.includes(id) && !exclude.has(id));
-      if (d.randomSupers > 0) superIds.push(...randomSample(pool(), d.randomSupers));
-      if (d.numSupers !== null) {
-        if (superIds.length < d.numSupers) superIds.push(...randomSample(pool(), d.numSupers - superIds.length));
-        const forcedCount = superIds.filter(id => forcedSet.has(id)).length;
-        superIds = superIds.slice(0, Math.max(d.numSupers, forcedCount));
+    // Superpower cards in the deck: exact counts from the text, honouring tag/class
+    // minimums ("at least 5 with Spawn", "all Boom"). Random mode ignores the model's
+    // picks (it was told not to make any); model-picks mode keeps them and tops up.
+    if (d && (d.randomSupers > 0 || d.numSupers !== null || d.superConstraints.length)) {
+      const cons = d.superConstraints || [];
+      const matches = (id, con) => {
+        const m = cardMeta(id);
+        if (!m) return false;
+        if (con.cls !== null && m.cls !== con.cls) return false;
+        if (con.tags && !con.tags.some(t => (m.tags || []).includes(t))) return false;
+        return true;
+      };
+      if (d.numSupers === null && d.randomSupers > 0) superIds = superIds.filter(id => forcedSet.has(id));
+      const forcedCount = superIds.filter(id => forcedSet.has(id)).length;
+      const target = d.numSupers !== null ? Math.max(d.numSupers, forcedCount)
+                   : d.randomSupers > 0 ? forcedCount + d.randomSupers
+                   : superIds.length;
+      const minFor = con => con.min === Infinity ? target : con.min;
+      const countFor = con => superIds.filter(id => matches(id, con)).length;
+      const fitsAll = id => cons.every(con => con.min !== Infinity || matches(id, con));
+      // shuffled candidates not yet in the deck
+      const pool = pred => randomSample(SUPERPOWER_CARDS.map(c => c.id).filter(id => !superIds.includes(id) && !exclude.has(id) && (!pred || pred(id))), SUPERPOWER_CARDS.length);
+      // 1. satisfy each minimum from matching cards
+      for (const con of cons) {
+        const need = minFor(con) - countFor(con);
+        if (need <= 0) continue;
+        const picks = pool(id => matches(id, con) && fitsAll(id)).slice(0, need);
+        superIds.push(...picks);
+        if (picks.length < need) directives.notes.push(`${sideName(side)} deck: only ${countFor(con)} superpower cards with ${con.label} available (asked for ${con.min === Infinity ? 'all' : con.min}).`);
+      }
+      // 2. fill to the target count
+      if (superIds.length < target) superIds.push(...pool(fitsAll).slice(0, target - superIds.length));
+      // 3. trim to the target: drop cards that help no minimum first, never a forced card, never below a minimum
+      const helps = id => cons.some(con => matches(id, con));
+      const canDrop = id => !forcedSet.has(id) && cons.every(con => !matches(id, con) || countFor(con) - 1 >= minFor(con));
+      for (const pass of [id => !helps(id), () => true]) {
+        for (let i = superIds.length - 1; i >= 0 && superIds.length > target; i--) {
+          if (pass(superIds[i]) && canDrop(superIds[i])) superIds.splice(i, 1);
+        }
       }
     }
 

@@ -1935,7 +1935,7 @@ function showToast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2000);
+  setTimeout(() => el.classList.remove('show'), Math.min(9000, 2000 + msg.length * 35));
 }
 
 // ============================================================
@@ -3331,6 +3331,19 @@ const TAG_SYNONYMS = [
 ];
 const CLASS_WORDS = { boom: 1, energy: 2, moxie: 3, floral: 4, cyber: 5, distortion: 6, cosmic: 7, magic: 8 };
 
+// Professional names → IDs. "Max" is also an English word ("max cost 3"), so it
+// only counts with a pro cue next to it. "Dr. Boom" is matched before the Boom class.
+const PRO_WORDS = [
+  [/\bdr\.?\s*boom\b|\bdrboom\b/, 7],
+  [/\bflora\b/, 2],
+  [/\baster\b/, 4],
+  [/\bjack\b/, 5],
+  [/\bslayborg\b/, 6],
+  [/\bcamille\b/, 8],
+  [/\bsydney\b/, 9],
+  [/\b(?:uses?|using|with|as|pro|professional|is|gets?|plays?|and|vs|versus|against)\s+max\b|\bmax\s+(?:as|is|vs|versus|against|for|on|deck)\b|\bmax's\b/, 3],
+];
+
 // Find the earliest ability-tag or class word in a phrase. Returns {tags,label} | {cls,label} | null.
 function parseQualifier(phrase) {
   const p = phrase.toLowerCase();
@@ -3361,9 +3374,11 @@ function parseQualifier(phrase) {
 // Scope words ("player deck", "bot deck", "both") pick which side(s) a clause
 // applies to; an unscoped clause inherits the previous clause's scope, else both.
 function parseDeckDirectives(text) {
-  const mk = () => ({ forceIds: [], excludeIds: [], randomSupers: 0, numSupers: null, numFriends: null, numPowers: null, superConstraints: [], modelPicksSupers: false });
+  const mk = () => ({ forceIds: [], excludeIds: [], randomSupers: 0, numSupers: null, numFriends: null, numPowers: null, superConstraints: [], modelPicksSupers: false,
+                      proId: null, excludePros: [], costMin: null, costMax: null, classes: null, excludeClasses: [], tags: null, mixedClass: false, randomDeck: false });
   const out = { p0: mk(), p1: mk(), summary: [], notes: [], any: false };
   if (!text) return out;
+  text = text.replace(/\bdr\.\s*boom\b/gi, 'Dr Boom'); // keep the pro's name inside one clause
 
   // Longest names first so "Joe Clone" wins over "Joe" and "Bloom Cat" over "Bloomer".
   const nameIndex = [];
@@ -3387,8 +3402,28 @@ function parseDeckDirectives(text) {
     const mentionsPlayer = /\b(player|human|me|my|p0)\b/.test(c);
     const both = /\b(both|each|either|every)\b/.test(c) || (mentionsBot && mentionsPlayer);
     const scope = both ? ['p0', 'p1'] : mentionsBot ? ['p1'] : mentionsPlayer ? ['p0'] : (lastScope || ['p0', 'p1']);
-    if (mentionsBot || mentionsPlayer || both) lastScope = scope;
+    const explicitScope = mentionsBot || mentionsPlayer || both;
+    if (explicitScope) lastScope = scope;
     const scopeLabel = scope.join('+');
+    const sideLabel = side => side === 'p0' ? 'player' : 'bot';
+    // Side words are read per comma-separated segment, so "a Boom deck for the bot, Flora for
+    // the player" lands on the right decks. A segment with no side word uses the clause scope
+    // (so a comma-separated card list followed by "in the player deck" still works).
+    const segs = [];
+    for (let i = 0, start = 0; i <= c.length; i++) {
+      if (i === c.length || c[i] === ',' || c[i] === ';') {
+        const seg = c.slice(start, i);
+        const mb = /\b(bot|opponent|enemy|ai|computer|p1)\b/.test(seg);
+        const mp = /\b(player|human|me|my|p0)\b/.test(seg);
+        const bo = /\b(both|each|either|every)\b/.test(seg) || (mb && mp);
+        segs.push({ start, end: i, scope: bo ? ['p0', 'p1'] : mb ? ['p1'] : mp ? ['p0'] : null });
+        start = i + 1;
+      }
+    }
+    const scopeAt = pos => {
+      const sg = segs.find(x => pos >= x.start && pos < x.end);
+      return (sg && sg.scope) || scope;
+    };
 
     const excluding = /\b(no|without|exclude|excluding|avoid|not|never|remove|ban|except)\b/.test(c)
                    && !/\b(put|include|add|use|give|with|specifically|these cards|following)\b/.test(c);
@@ -3412,6 +3447,124 @@ function parseDeckDirectives(text) {
       out.summary.push(`${excluding ? 'Exclude' : 'Force'} ${idList.map(id => `${getCardDisplayName(id)} (ID=${id})`).join(', ')} → ${scopeLabel}`);
     }
 
+    // --- professionals: "use Camille as the pro", "Camille vs Dr. Boom", "bot uses Slayborg"
+    const proHits = [];
+    for (const [re, pid] of PRO_WORDS) {
+      const pm = masked.match(re);
+      if (pm && !proHits.some(h => h.pid === pid)) proHits.push({ pos: pm.index, pid });
+    }
+    if (proHits.length) {
+      proHits.sort((a, b) => a.pos - b.pos);
+      // mask pro names so "Dr. Boom" can't read as the Boom class below
+      for (const [re] of PRO_WORDS) masked = masked.replace(re, m0 => '#'.repeat(m0.length));
+      if (excluding) {
+        for (const side of scope) out[side].excludePros.push(...proHits.map(h => h.pid));
+        out.summary.push(`avoid pro ${proHits.map(h => getProName(h.pid)).join(', ')} → ${scopeLabel}`);
+      } else {
+        const assigned = {};
+        const loose = [];
+        for (const h of proHits) {
+          const sc = scopeAt(h.pos);
+          if (sc.length === 1 && !assigned[sc[0]]) assigned[sc[0]] = h.pid; else loose.push(h.pid);
+        }
+        if (!Object.keys(assigned).length) {
+          if (loose.length >= 2) { assigned.p0 = loose[0]; assigned.p1 = loose[1]; }
+          else for (const side of (explicitScope ? scope : (lastScope || ['p0']))) assigned[side] = loose[0];
+        } else {
+          for (const pid of loose) for (const side of ['p0', 'p1']) if (!assigned[side]) { assigned[side] = pid; break; }
+        }
+        for (const [side, pid] of Object.entries(assigned)) out[side].proId = pid;
+        out.summary.push(`pro ${Object.entries(assigned).map(([side, pid]) => `${getProName(pid)} (${sideLabel(side)})`).join(', ')}`);
+      }
+    }
+
+    // --- card-level filters: cost / class / ability, "mixed class", "random deck".
+    //     Skipped for clauses about superpowers (those use superConstraints) and for
+    //     cost-distribution phrasing ("two of each cost …"), which slot mode resolves.
+    const cardLevel = !/\b(super\s*powers?|supers?)\b/.test(c) && !/\bof each cost\b|\bcost[- ]?\d+\s*cards?\b/.test(c);
+    if (cardLevel) {
+      const N = `(${NUM})`;
+      let cm, costMin = null, costMax = null;
+      if ((cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+(?:between\\s+|from\\s+)?${N}\\s*(?:-|–|to|and|through)\\s*${N}`)))) {
+        costMin = wordToCount(cm[1]); costMax = wordToCount(cm[2]);
+      } else if ((cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+${N}\\s+(?:or\\s+(?:less|lower|under|below|fewer|cheaper)|max(?:imum)?|tops)\\b`)))
+              || (cm = c.match(new RegExp(`\\b(?:at most|maximum|max|up to|no more than)\\s+cost\\s+(?:of\\s+)?${N}\\b`)))
+              || (cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+(?:at most|up to|no more than|a maximum of)\\s+${N}\\b`)))) {
+        costMax = wordToCount(cm[1]);
+      } else if ((cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+(?:under|below|less than)\\s+${N}\\b`)))
+              || (cm = c.match(new RegExp(`\\b(?:under|below|less than)\\s+${N}\\s+cost\\b`)))) {
+        costMax = wordToCount(cm[1]) - 1;
+      } else if ((cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+${N}\\s+(?:or\\s+(?:more|higher|above|greater)|min(?:imum)?|plus)\\b`)))
+              || (cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+(?:at least|no less than|a minimum of|minimum)\\s+${N}\\b`)))
+              || (cm = c.match(new RegExp(`\\b(?:at least|minimum|min)\\s+cost\\s+(?:of\\s+)?${N}\\b`)))) {
+        costMin = wordToCount(cm[1]);
+      } else if ((cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+(?:over|above|more than)\\s+${N}\\b`)))) {
+        costMin = wordToCount(cm[1]) + 1;
+      } else if ((cm = c.match(new RegExp(`\\bcost(?:s|ing)?\\s+(?:exactly\\s+|of\\s+)?${N}\\b`)))
+              || (cm = c.match(new RegExp(`\\b${N}[- ]cost\\b`)))) {
+        costMin = costMax = wordToCount(cm[1]);
+      }
+      if (costMin !== null || costMax !== null) {
+        if (costMin !== null && costMax !== null && costMin > costMax) [costMin, costMax] = [costMax, costMin];
+        const cs = scopeAt(cm.index);
+        for (const side of cs) { out[side].costMin = costMin; out[side].costMax = costMax; }
+        const lab = costMin !== null && costMin === costMax ? `= ${costMin}`
+                  : costMin !== null && costMax !== null ? `${costMin}–${costMax}`
+                  : costMin !== null ? `≥ ${costMin}` : `≤ ${costMax}`;
+        out.summary.push(`cost ${lab} → ${cs.join('+')}`);
+      }
+
+      const classHits = [];
+      for (const [w, cls] of Object.entries(CLASS_WORDS)) {
+        const cw = masked.match(new RegExp(`\\b${w}\\b`));
+        if (cw) classHits.push({ cls, pos: cw.index });
+      }
+      if (classHits.length) {
+        const restrictive = /\b(all|only|every|each|just|mono|pure|exclusively|nothing but)\b/.test(c)
+                         || new RegExp(`\\b(?:${Object.keys(CLASS_WORDS).join('|')})\\s+(?:cards?|deck|friends?|powers?)\\b`).test(masked);
+        const groups = new Map();
+        for (const h of classHits) {
+          const sc = scopeAt(h.pos), k = sc.join('+');
+          if (!groups.has(k)) groups.set(k, { sc, cls: [] });
+          groups.get(k).cls.push(h.cls);
+        }
+        for (const { sc, cls } of groups.values()) {
+          const classNames = cls.map(k => CARD_CLASS_NAMES[k]).join('/');
+          if (excluding) {
+            for (const side of sc) out[side].excludeClasses.push(...cls);
+            out.summary.push(`no ${classNames} cards → ${sc.join('+')}`);
+          } else if (restrictive) {
+            for (const side of sc) out[side].classes = [...new Set([...(out[side].classes || []), ...cls])];
+            out.summary.push(`classes: ${classNames} → ${sc.join('+')}`);
+          }
+        }
+      }
+
+      const mx = /\bmixed[- ]?class(?:es)?\b|\bmix of classes\b|\bvariety of classes\b|\bdifferent classes\b|\bmulti[- ]?class\b|\bevery class\b|\ball classes\b|\bclass variety\b/.exec(c);
+      if (mx) {
+        const cs = scopeAt(mx.index);
+        for (const side of cs) out[side].mixedClass = true;
+        out.summary.push(`mixed classes → ${cs.join('+')}`);
+      }
+      const rx = /\brandom(?:ized|ly)?\s+(?:deck|cards|friends|powers|mix|selection|picks?)\b|\brandomi[sz]ed?\b|\bat random\b/.exec(c);
+      if (rx) {
+        const cs = scopeAt(rx.index);
+        for (const side of cs) out[side].randomDeck = true;
+        out.summary.push(`random deck (tool picks the friends/powers) → ${cs.join('+')}`);
+      }
+
+      let tm;
+      if ((tm = c.match(/\b(?:all|only|every|each|just)\s+(?:the\s+)?(?:cards?|friends?|powers?)\s+(?:that|which|with|having|should|must|need to|needs to|have|has)\b(.*)$/))
+       || (tm = c.match(/\bonly\s+([a-z][a-z ]*?)\s+(?:cards?|friends?|powers?)\b/))) {
+        const q = parseQualifier(tm[1]);
+        if (q && q.tags) {
+          const cs = scopeAt(tm.index);
+          for (const side of cs) out[side].tags = q.tags;
+          out.summary.push(`every card with ${q.label} → ${cs.join('+')}`);
+        }
+      }
+    }
+
     // --- "only superpowers": no friends, no powers
     if (/\b(only|just|nothing but|purely|exclusively)\s+(random\s+)?(super\s*powers?|supers?)\b|\b(super\s*powers?|supers?)\s+only\b/.test(c)) {
       for (const side of scope) { out[side].numFriends = 0; out[side].numPowers = 0; }
@@ -3424,6 +3577,7 @@ function parseDeckDirectives(text) {
     for (const m of c.matchAll(countRe)) {
       const n = wordToCount(m[1]);
       if (n === null) continue;
+      const cs = scopeAt(m.index);
       const isRandom = /^random/.test(m[2] || '');
       const kinds = [kindOf(m[3])];
       if (m[4]) kinds.push(kindOf(m[4]));
@@ -3431,7 +3585,7 @@ function parseDeckDirectives(text) {
       if (kinds.includes('super') && /\b(loadout|professional|pro's|pros)\b/.test(c)) continue;
       for (const kind of kinds) {
         let what;
-        for (const side of scope) {
+        for (const side of cs) {
           if (kind === 'super') {
             superScopeSeen.add(side);
             if (isRandom) { out[side].randomSupers += n; what = 'random superpower cards'; }
@@ -3439,7 +3593,7 @@ function parseDeckDirectives(text) {
           } else if (kind === 'friend') { out[side].numFriends = n; what = 'friends'; }
           else { out[side].numPowers = n; what = 'powers'; }
         }
-        out.summary.push(`${n} ${what} → ${scopeLabel}`);
+        out.summary.push(`${n} ${what} → ${cs.join('+')}`);
       }
     }
 
@@ -3563,7 +3717,7 @@ Hard rules — check each before answering:
 4. "One card from each class" means no class repeats within a deck (friends + powers combined).
 5. A cost distribution ("two of each cost from 1 to 4") means exactly that many cards per cost, in both decks, overriding the default sizes.
 6. Per-deck instructions ("the player deck gets X", "give the bot Y") apply to that deck only.
-7. Requirements marked as already parsed by the tool WILL be enforced after you answer. Include forced cards yourself too (so your other picks complement them) and never duplicate or contradict them. Where the tool says it will add random superpowers, leave superpower_card_ids empty unless specific superpowers were also named.
+7. Requirements marked as already parsed by the tool WILL be enforced after you answer — forced professionals, forced/excluded cards, cost/class/ability filters and per-deck counts. Make your own picks satisfy them too (include forced cards yourself so the rest complements them) and never duplicate or contradict them. Where the tool says it will add random superpowers, leave superpower_card_ids empty unless specific superpowers were also named.
 8. Decks should feel thematically opposed or complementary; give each a fitting deck_name.
 9. challenge_title: short and punchy. challenge_body: exactly the form <align="center">one or two sentences<style=Novas></style>.`;
 }
@@ -3771,11 +3925,21 @@ ${buildProfessionalList()}`;
       const d = directives[side];
       const f = d.numFriends !== null ? d.numFriends : numFriends;
       const p = d.numPowers !== null ? d.numPowers : numPowers;
-      let extra = '';
+      const bits = [];
+      if (d.proId) bits.push(`Professional: ${getProName(d.proId)} (ID=${d.proId}), fixed by the designer`);
+      if (d.costMin !== null || d.costMax !== null) {
+        bits.push(d.costMin !== null && d.costMin === d.costMax ? `every card costs exactly ${d.costMin}`
+          : `cost ${d.costMin !== null ? '≥ ' + d.costMin : ''}${d.costMin !== null && d.costMax !== null ? ' and ' : ''}${d.costMax !== null ? '≤ ' + d.costMax : ''}`);
+      }
+      if (d.classes) bits.push(`only the ${d.classes.map(k => CARD_CLASS_NAMES[k]).join('/')} class`);
+      if (d.excludeClasses.length) bits.push(`no ${d.excludeClasses.map(k => CARD_CLASS_NAMES[k]).join('/')} cards`);
+      if (d.tags) bits.push(`every card tagged ${d.tags[0]}`);
+      if (d.mixedClass) bits.push('spread across many classes');
+      if (d.randomDeck) bits.push('the tool will pick this deck\'s friends/powers at random — leave friend_card_ids and power_card_ids empty');
       const cons = d.superConstraints.map(k => `${k.min === Infinity ? 'all' : 'at least ' + k.min} with ${k.label}`).join(', ');
-      if (d.randomSupers > 0) extra += ` (+ ${d.randomSupers} random Superpower card${d.randomSupers === 1 ? '' : 's'} the tool will add${cons ? ', ' + cons : ''} — leave superpower_card_ids empty unless specific superpowers were named)`;
-      if (d.numSupers !== null) extra += ` + exactly ${d.numSupers} Superpower card${d.numSupers === 1 ? '' : 's'} of your choice in superpower_card_ids${cons ? ' (' + cons + ')' : ''}`;
-      return `- ${label} deck: ${f} Friend card${f === 1 ? '' : 's'} + ${p} Power card${p === 1 ? '' : 's'}${extra}`;
+      if (d.randomSupers > 0) bits.push(`+ ${d.randomSupers} random Superpower card${d.randomSupers === 1 ? '' : 's'} the tool will add${cons ? ', ' + cons : ''} — leave superpower_card_ids empty unless specific superpowers were named`);
+      if (d.numSupers !== null) bits.push(`+ exactly ${d.numSupers} Superpower card${d.numSupers === 1 ? '' : 's'} of your choice in superpower_card_ids${cons ? ' (' + cons + ')' : ''}`);
+      return `- ${label} deck: ${f} Friend card${f === 1 ? '' : 's'} + ${p} Power card${p === 1 ? '' : 's'}${bits.length ? '; ' + bits.join('; ') : ''}`;
     };
     userPrompt = `Designer's theme / instructions:
 """${theme}"""
@@ -3827,6 +3991,10 @@ ${buildCardCatalogue()}`;
       result.bot_deck.power_card_ids     = resolvedPowerIds.p1;
     }
 
+    // Keep the last exchange around for debugging (DevTools: window.__aiThemeLast)
+    window.__aiThemeLast = { model: getAIThemeModel(), systemPrompt, userPrompt, directives, result, response: data };
+    console.info('[AI Theme] enforced:', directives.summary, '\n[AI Theme] model returned:', JSON.parse(JSON.stringify(result)));
+
     applyAIResult(result, effectiveNumFriends, effectiveNumPowers, useSlotMode, directives);
 
     const toastBits = [];
@@ -3864,11 +4032,43 @@ function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS, directi
 
     let proId = deckData.professional_id;
     if (!PROFESSIONALS[proId]) proId = parseInt(Object.keys(PROFESSIONALS)[0]);
+    if (d && d.proId) {
+      proId = d.proId;
+    } else if (d && d.excludePros && d.excludePros.includes(proId)) {
+      proId = randomChoice(Object.keys(PROFESSIONALS).map(Number).filter(p => !d.excludePros.includes(p)));
+    }
+
+    // Card-level filters from the text (cost / class / ability). Forced cards are exempt.
+    const classSet = d && d.classes ? new Set(d.classes) : null;
+    const exClassSet = d && d.excludeClasses && d.excludeClasses.length ? new Set(d.excludeClasses) : null;
+    const hasFilter = !!(d && (d.costMin !== null || d.costMax !== null || classSet || exClassSet || d.tags));
+    const filt = id => {
+      if (!hasFilter) return true;
+      const m = cardMeta(id);
+      if (!m) return false;
+      if (d.costMin !== null && m.cost < d.costMin) return false;
+      if (d.costMax !== null && m.cost > d.costMax) return false;
+      if (classSet && !classSet.has(m.cls)) return false;
+      if (exClassSet && exClassSet.has(m.cls)) return false;
+      if (d.tags && !d.tags.some(t => (m.tags || []).includes(t))) return false;
+      return true;
+    };
+    // "random deck": the tool picks this side's friends/powers; the model's picks are ignored
+    const randomDeck = !!(d && d.randomDeck) && !cardsResolvedByJS;
+    let dropped = 0;
+    const modelPicks = (ids, valid) => {
+      if (randomDeck) return [];
+      const ok = (ids || []).filter(keep(valid));
+      const kept = ok.filter(id => forcedSet.has(id) || filt(id));
+      dropped += ok.length - kept.length;
+      return kept;
+    };
 
     // Forced cards come first so padding/truncation can never drop them.
-    let friendIds = uniq([...forced.filter(keep(validFriendIds)), ...(deckData.friend_card_ids || []).filter(keep(validFriendIds))]);
-    let powerIds  = uniq([...forced.filter(keep(validPowerIds)),  ...(deckData.power_card_ids  || []).filter(keep(validPowerIds))]);
+    let friendIds = uniq([...forced.filter(keep(validFriendIds)), ...modelPicks(deckData.friend_card_ids, validFriendIds)]);
+    let powerIds  = uniq([...forced.filter(keep(validPowerIds)),  ...modelPicks(deckData.power_card_ids, validPowerIds)]);
     let superIds  = uniq([...forced.filter(keep(validSuperIds)),  ...(deckData.superpower_card_ids || []).filter(keep(validSuperIds))]);
+    if (dropped && directives) directives.notes.push(`${sideName(side)} deck: replaced ${dropped} model pick${dropped === 1 ? '' : 's'} that broke the cost/class/ability filter.`);
 
     // Enforce class uniqueness if requested (friends + powers combined; forced cards exempt)
     if (classUniquenessRequested) {
@@ -3891,13 +4091,37 @@ function applyAIResult(result, numFriends, numPowers, cardsResolvedByJS, directi
     if (!cardsResolvedByJS) {
       const targetF = d && d.numFriends !== null ? d.numFriends : numFriends;
       const targetP = d && d.numPowers  !== null ? d.numPowers  : numPowers;
-      const fit = (ids, pool, target) => {
-        if (ids.length < target) {
-          const remaining = pool.map(c => c.id).filter(id => !ids.includes(id) && !exclude.has(id));
-          ids.push(...randomSample(remaining, target - ids.length));
+      const mixed = !!(d && d.mixedClass);
+      // Pick n from candidates; with "mixed class" spread picks across classes (unused classes first)
+      const pick = (cands, n, existing) => {
+        if (!mixed) return randomSample(cands, n);
+        const used = new Set(existing.map(id => (cardMeta(id) || {}).cls));
+        const byCls = new Map();
+        for (const id of randomSample(cands, cands.length)) {
+          const k = (cardMeta(id) || {}).cls;
+          if (!byCls.has(k)) byCls.set(k, []);
+          byCls.get(k).push(id);
         }
-        const forcedCount = ids.filter(id => forcedSet.has(id)).length;
-        return ids.slice(0, Math.max(target, forcedCount));
+        const order = [...byCls.keys()].sort((a, b) => (used.has(a) ? 1 : 0) - (used.has(b) ? 1 : 0));
+        const picked = [];
+        while (picked.length < n && order.some(k => byCls.get(k).length)) {
+          for (const k of order) { const arr = byCls.get(k); if (arr.length && picked.length < n) picked.push(arr.pop()); }
+        }
+        return picked;
+      };
+      const fit = (ids, pool, target) => {
+        const forcedIds = ids.filter(id => forcedSet.has(id));
+        let rest = ids.filter(id => !forcedSet.has(id));
+        if (mixed) rest = pick(rest, rest.length, forcedIds); // reorder model picks so truncation keeps a class spread
+        const chosen = [...forcedIds, ...rest].slice(0, Math.max(target, forcedIds.length));
+        if (chosen.length < target) {
+          const remaining = pool.map(c => c.id).filter(id => !chosen.includes(id) && !exclude.has(id) && filt(id));
+          chosen.push(...pick(remaining, target - chosen.length, chosen));
+          if (chosen.length < target && directives) {
+            directives.notes.push(`${sideName(side)} deck: only ${chosen.length} ${pool === FRIEND_CARDS ? 'friends' : 'powers'} match the filter (wanted ${target}).`);
+          }
+        }
+        return chosen;
       };
       friendIds = fit(friendIds, FRIEND_CARDS, targetF);
       powerIds  = fit(powerIds,  POWER_CARDS,  targetP);

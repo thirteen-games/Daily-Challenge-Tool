@@ -621,6 +621,54 @@
     flex-shrink: 0;
     background: var(--input-bg);
   }
+  .lookup-summary {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 10px 0 0;
+    line-height: 1.5;
+  }
+  .lookup-results { overflow-y: auto; max-height: 46vh; margin-top: 4px; }
+  .lookup-group {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin: 10px 0 4px;
+  }
+  .lookup-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    background: var(--card);
+    font-size: 13px;
+    border-left: 3px solid transparent;
+  }
+  .lookup-item.friend { border-left-color: var(--friend); }
+  .lookup-item.power { border-left-color: var(--power); }
+  .lookup-item.super { border-left-color: #f39c12; }
+  .lookup-item.missing { border-left-color: var(--danger); color: var(--danger); }
+  .lookup-item .lk-main { flex: 1; min-width: 0; }
+  .lookup-item .lk-id { color: var(--text-dim); font-size: 11px; margin-right: 4px; }
+  .lookup-item .lk-meta { font-size: 11px; color: var(--text-dim); margin-left: 6px; }
+  .lookup-item .lk-text {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 3px;
+    white-space: pre-wrap;
+    line-height: 1.4;
+  }
+  .lookup-item .lk-wp {
+    font-size: 9px;
+    color: var(--accent2);
+    border: 1px solid var(--accent2);
+    border-radius: 3px;
+    padding: 1px 4px;
+    margin-left: 5px;
+    white-space: nowrap;
+  }
 
   /* Mode toggle */
   .mode-toggle {
@@ -1051,6 +1099,9 @@
     <div class="btn-row">
       <button class="btn btn-block" onclick="openImportChallenge()" title="Import a challenge from this tool's SQL output">📥 Import SQL</button>
       <button class="btn btn-block" onclick="openImportChallengeDB()" title="Import a challenge from database CSV rows (decks, scenario, daily challenge)">🗄️ Import from DB</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-block" onclick="openCardLookup()" title="Paste a list of card IDs to see what they are">🔍 Card Lookup</button>
     </div>
   </div>
 
@@ -1488,6 +1539,22 @@
       <div class="btn-row">
         <button class="btn btn-primary" onclick="importPuzzleSQL()">Import</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Card Lookup Modal -->
+<div class="modal-overlay" id="cardLookupOverlay" onclick="closeCardLookup(event)">
+  <div class="modal ai-modal" style="width:660px;">
+    <div class="modal-header">
+      <h3>🔍 Card Lookup</h3>
+      <button class="modal-close" onclick="closeCardLookup()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px;">Paste card IDs in any format — <code>[25, 28, 27]</code>, <code>25 28 27</code>, or one per line:</label>
+      <textarea id="cardLookupInput" placeholder="[25, 28, 27, 56, 162, 169, 23, 166, 91, 83, 50]" style="min-height:64px;" oninput="renderCardLookup()"></textarea>
+      <div class="lookup-summary" id="cardLookupSummary"></div>
+      <div class="lookup-results" id="cardLookupResults"></div>
     </div>
   </div>
 </div>
@@ -2286,6 +2353,102 @@ function onSkipDraftingChange() {
   const checked = document.getElementById('skipDrafting').checked;
   document.getElementById('startingCardsGroup').style.display = checked ? '' : 'none';
   updateSQL();
+}
+
+// ============================================================
+// CARD LOOKUP — paste a list of card IDs, see what they are
+// ============================================================
+
+function openCardLookup() {
+  document.getElementById('cardLookupOverlay').classList.add('active');
+  renderCardLookup();
+  document.getElementById('cardLookupInput').focus();
+}
+
+function closeCardLookup(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('cardLookupOverlay').classList.remove('active');
+}
+
+function renderCardLookup() {
+  const raw = document.getElementById('cardLookupInput').value;
+  const summaryEl = document.getElementById('cardLookupSummary');
+  const resultsEl = document.getElementById('cardLookupResults');
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // Accept any format: [25, 28], 25 28, one per line, etc.
+  const ids = (raw.match(/\d+/g) || []).map(Number);
+  if (ids.length === 0) {
+    summaryEl.innerHTML = '';
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  // Bucket by type, preserving input order. Superpowers have no CARD_DATA entry.
+  const groups = { friend: [], power: [], super: [], missing: [] };
+  for (const id of ids) {
+    const card = ALL_CARDS[id];
+    if (!card) { groups.missing.push({ id }); continue; }
+    const key = card.type === 1 ? 'friend' : card.type === 3 ? 'super' : 'power';
+    groups[key].push({ id, card, d: CARD_DATA[id] });
+  }
+
+  // Summary line
+  let totalCost = 0, wpCount = 0;
+  const clsCount = {};
+  for (const key of ['friend', 'power', 'super']) {
+    for (const e of groups[key]) {
+      if (e.d) {
+        totalCost += e.d.cost;
+        const cn = CARD_CLASS_NAMES[e.d.cls] || ('Class' + e.d.cls);
+        clsCount[cn] = (clsCount[cn] || 0) + 1;
+      }
+      if (cardHasWhenPlayed(e.id)) wpCount++;
+    }
+  }
+  const dupes = ids.length - new Set(ids).size;
+  const parts = [
+    `<strong>${ids.length}</strong> card${ids.length === 1 ? '' : 's'}`,
+    `${groups.friend.length} friend / ${groups.power.length} power` +
+      (groups.super.length ? ` / ${groups.super.length} super` : ''),
+    `total cost <strong>${totalCost}</strong>`,
+  ];
+  if (wpCount) parts.push(`${wpCount} with When Played`);
+  if (dupes) parts.push(`${dupes} duplicate${dupes === 1 ? '' : 's'}`);
+  if (groups.missing.length) parts.push(`<span style="color:var(--danger)">${groups.missing.length} unknown</span>`);
+  const clsStr = Object.keys(clsCount)
+    .sort((a, b) => clsCount[b] - clsCount[a])
+    .map(k => `${k}×${clsCount[k]}`).join(', ');
+  summaryEl.innerHTML = parts.join(' &nbsp;·&nbsp; ') + (clsStr ? `<br>Classes: ${clsStr}` : '');
+
+  // Result rows
+  const label = { friend: 'Friends', power: 'Powers', super: 'Superpowers', missing: 'Not found' };
+  let html = '';
+  for (const key of ['friend', 'power', 'super', 'missing']) {
+    const list = groups[key];
+    if (!list.length) continue;
+    html += `<div class="lookup-group">${label[key]} (${list.length})</div>`;
+    for (const e of list) {
+      if (key === 'missing') {
+        html += `<div class="lookup-item missing"><div class="lk-main"><span class="lk-id">#${e.id}</span>No card with this ID</div></div>`;
+        continue;
+      }
+      const d = e.d;
+      const meta = d
+        ? `${d.cost} cost${d.hp > 0 ? `, ${d.hp} HP` : ''}, ${CARD_CLASS_NAMES[d.cls] || 'Unknown'}`
+        : 'superpower';
+      const text = d && d.desc ? d.desc.replace(/<[^>]*>/g, '').replace(/[ \t]+/g, ' ').trim() : '';
+      const wp = cardHasWhenPlayed(e.id) ? '<span class="lk-wp">When Played</span>' : '';
+      html += `<div class="lookup-item ${key}">
+        ${spriteImg(e.card.name, 'modal-sprite')}
+        <div class="lk-main">
+          <span class="lk-id">#${e.id}</span><strong>${esc(e.card.displayName)}</strong><span class="lk-meta">${meta}</span>${wp}
+          ${text ? `<div class="lk-text">${esc(text)}</div>` : ''}
+        </div>
+      </div>`;
+    }
+  }
+  resultsEl.innerHTML = html;
 }
 
 // ============================================================
@@ -7684,6 +7847,7 @@ document.addEventListener('keydown', e => {
     document.getElementById('boardPickerOverlay').classList.remove('active');
     document.getElementById('puzzleAiOverlay').classList.remove('active');
     document.getElementById('slotBuilderOverlay').classList.remove('active');
+    document.getElementById('cardLookupOverlay').classList.remove('active');
   }
 });
 </script>

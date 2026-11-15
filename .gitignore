@@ -24,3 +24,4 @@ env/
 
 # Output files
 *.sql
+.DS_Store

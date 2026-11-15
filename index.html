@@ -3332,7 +3332,7 @@ const TAG_SYNONYMS = [
 const CLASS_WORDS = { boom: 1, energy: 2, moxie: 3, floral: 4, cyber: 5, distortion: 6, cosmic: 7, magic: 8 };
 
 // Professional names → IDs. "Max" is also an English word ("max cost 3"), so it
-// only counts with a pro cue next to it. "Dr. Boom" is matched before the Boom class.
+// only counts with a pro cue next to it ("use Max", "Max the pro"). "Dr. Boom" is matched before the Boom class.
 const PRO_WORDS = [
   [/\bdr\.?\s*boom\b|\bdrboom\b/, 7],
   [/\bflora\b/, 2],
@@ -3341,7 +3341,7 @@ const PRO_WORDS = [
   [/\bslayborg\b/, 6],
   [/\bcamille\b/, 8],
   [/\bsydney\b/, 9],
-  [/\b(?:uses?|using|with|as|pro|professional|is|gets?|plays?|and|vs|versus|against)\s+max\b|\bmax\s+(?:as|is|vs|versus|against|for|on|deck)\b|\bmax's\b/, 3],
+  [/\b(?:uses?|using|with|as|pro|professional|is|gets?|plays?|and|vs|versus|against)\s+max\b|\bmax\s+(?:as|is|vs|versus|against|for|on|deck)\b|\bmax\s+(?:the\s+|their\s+|its\s+)?pro(?:fessional)?\b|\bmax's\b/, 3],
 ];
 
 // Find the earliest ability-tag or class word in a phrase. Returns {tags,label} | {cls,label} | null.

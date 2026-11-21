@@ -3099,7 +3099,9 @@ function generateSQL() {
   const firstPlayer = document.getElementById('firstPlayer').value;
   const roundLimit = getRoundLimit();
   const settings = {};
-  if (roundLimit !== null) settings.WinType = 1;
+  // The server reads WinType as text ("novas" | "round" | "novasorround");
+  // a numeric value makes it discard the whole Settings JSON.
+  if (roundLimit !== null) settings.WinType = "round";
   settings.RewardID = DEFAULT_REWARD_ID;
   settings.NovasToWin = roundLimit !== null ? 999 : novas;
   if (roundLimit !== null) settings.RoundLimit = roundLimit;
